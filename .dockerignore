@@ -1,0 +1,50 @@
+# Version control / worktrees
+.git
+.git/
+.gitignore
+.github/
+.claude/
+
+# Python build + cache
+.venv/
+venv/
+env/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Local env — ship .env.example, never .env*
+.env
+.env.*
+!.env.example
+
+# Test suite isn't needed to run the server. Keeps image ~500KB slimmer.
+tests/
+conftest.py
+
+# Docs / editor metadata
+docs/
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+
+# Deploy configs shouldn't ship inside the image
+deploy/
+docker-compose.yml
+Dockerfile
+.dockerignore
