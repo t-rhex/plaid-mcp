@@ -63,18 +63,41 @@ from .base import PriceTable
 
 logger = logging.getLogger(__name__)
 
-# USDC contract addresses on Base and Base Sepolia. These are the only
-# networks x402 officially supports at time of writing; we gate on the
-# network string and refuse anything else so an operator can't silently
-# accept USDC on an unsupported chain.
+# USDC contract addresses keyed by CAIP-2 network ID. x402 v2 schemas
+# (ExactEvmClientScheme etc.) identify networks via CAIP-2, so we emit
+# the same identifiers in our PaymentRequirements. Friendly aliases
+# ("base-sepolia" / "base") are accepted at construction time and
+# normalized here so operators don't have to remember chain IDs.
 _USDC_ASSETS = {
-    "base-sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-    "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "eip155:84532": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",  # Base Sepolia
+    "eip155:8453":  "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",  # Base mainnet
+}
+
+# EIP-712 domain info for the exact-EVM scheme. The facilitator uses
+# ``extra.name`` + ``extra.version`` to build the TransferWithAuthorization
+# typed-data hash; omitting them causes the facilitator to reject the
+# payload with ``invalid_exact_evm_missing_eip712_domain``. USDC on Base +
+# Base Sepolia both report name="USDC", version="2".
+_USDC_DOMAIN = {
+    "eip155:84532": {"name": "USDC", "version": "2"},
+    "eip155:8453":  {"name": "USDC", "version": "2"},
+}
+
+# Friendly aliases → CAIP-2. The list is small on purpose — only
+# networks we actually test.
+_NETWORK_ALIASES = {
+    "base-sepolia": "eip155:84532",
+    "base": "eip155:8453",
 }
 
 # Networks considered "mainnet" — require explicit opt-in so a typo in
 # config can't silently start accepting real USDC.
-_MAINNET_NETWORKS = {"base"}
+_MAINNET_NETWORKS = {"eip155:8453"}
+
+
+def _normalize_network(network: str) -> str:
+    """Map friendly names → CAIP-2; pass CAIP-2 through unchanged."""
+    return _NETWORK_ALIASES.get(network, network)
 
 # 6 decimals for USDC → 1 cent = 10,000 atomic units.
 _ATOMIC_PER_CENT = 10_000
@@ -181,10 +204,12 @@ class X402Gate:
         mcp_path: str = DEFAULT_MCP_PATH,
         facilitator: FacilitatorLike | None = None,
     ) -> None:
+        network = _normalize_network(network)
         if network not in _USDC_ASSETS:
             raise ValueError(
                 f"X402Gate: unsupported network {network!r}; "
-                f"expected one of {sorted(_USDC_ASSETS)}."
+                f"expected one of {sorted(_USDC_ASSETS)} "
+                f"(aliases: {sorted(_NETWORK_ALIASES)})."
             )
 
         _validate_network_facilitator(network, facilitator_url)
@@ -364,6 +389,12 @@ class X402Gate:
     def _payment_requirements(self, tool_name: str) -> PaymentRequirements:
         cents = self.prices.for_tool(tool_name)
         atomic = str(max(cents, 0) * _ATOMIC_PER_CENT)
+        domain = _USDC_DOMAIN.get(self.network, {})
+        extra = {
+            **domain,  # name, version — required by exact-EVM facilitator
+            "tool": tool_name,
+            "priceCents": cents,
+        }
         return PaymentRequirements(
             scheme="exact",
             network=self.network,
@@ -371,7 +402,7 @@ class X402Gate:
             amount=atomic,
             pay_to=self.receiving_address,
             max_timeout_seconds=60,
-            extra={"tool": tool_name, "priceCents": cents},
+            extra=extra,
         )
 
     def _build_402_body(

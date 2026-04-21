@@ -283,7 +283,9 @@ def test_x402_returns_402_on_tool_call_without_payment(
 
     requirement = body["accepts"][0]
     assert requirement["scheme"] == "exact"
-    assert requirement["network"] == "base-sepolia"
+    # CAIP-2 chain ID for Base Sepolia. The gate accepts the friendly
+    # alias at construction but emits the spec-canonical form.
+    assert requirement["network"] == "eip155:84532"
     # summarize_debt_tool = 50 cents = 500_000 atomic USDC (6 decimals).
     assert requirement["amount"] == "500000"
     assert requirement["payTo"] == "0x0000000000000000000000000000000000000001"
@@ -355,7 +357,7 @@ def test_x402_passes_through_well_formed_payment_header(
         payload={"signature": "0xabc", "authorization": {}},
         accepted={
             "scheme": "exact",
-            "network": "base-sepolia",
+            "network": "eip155:84532",
             "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
             "amount": "500000",
             "payTo": "0x0000000000000000000000000000000000000001",
@@ -460,7 +462,7 @@ def test_x402_base_mainnet_price_matches_usdc(fake_mcp_app: Starlette) -> None:
     accepts = response.json()["accepts"][0]
     # Base mainnet USDC.
     assert accepts["asset"] == "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
-    assert accepts["network"] == "base"
+    assert accepts["network"] == "eip155:8453"
 
 
 def test_x402_batch_with_tool_call_gates_entire_batch(
@@ -505,7 +507,7 @@ def _shape_valid_payload_json() -> str:
         payload={"signature": "0xabc", "authorization": {}},
         accepted={
             "scheme": "exact",
-            "network": "base-sepolia",
+            "network": "eip155:84532",
             "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
             "amount": "500000",
             "payTo": "0x0000000000000000000000000000000000000001",
@@ -729,7 +731,7 @@ def test_build_gate_allows_mainnet_with_opt_in() -> None:
         )
     )
     assert isinstance(gate, X402Gate)
-    assert gate.network == "base"
+    assert gate.network == "eip155:8453"
 
 
 def test_build_gate_refuses_mismatched_testnet_facilitator_for_mainnet() -> None:
@@ -807,10 +809,10 @@ def test_x402_live_base_sepolia_payment_round_trip(fake_mcp_app: Starlette) -> N
     from eth_account import Account
     from x402 import x402Client
     from x402.mechanisms.evm.exact import ExactEvmClientScheme
-    from x402.mechanisms.evm.signers import LocalAccountEvmSigner
+    from x402.mechanisms.evm.signers import EthAccountSigner
     from x402.schemas import PaymentRequired
 
-    signer = LocalAccountEvmSigner(Account.from_key(private_key))
+    signer = EthAccountSigner(Account.from_key(private_key))
     receiver = os.getenv(
         "X402_TESTNET_RECEIVING_ADDRESS", signer.address
     )
@@ -835,6 +837,8 @@ def test_x402_live_base_sepolia_payment_round_trip(fake_mcp_app: Starlette) -> N
     required = PaymentRequired.model_validate(probe.json())
 
     # Step 2: sign a PaymentPayload with x402Client.
+    # Register under the CAIP-2 network identifier that the gate emits
+    # in its 402 requirements (eip155:84532 = Base Sepolia).
     x402_client = x402Client()
     x402_client.register("eip155:84532", ExactEvmClientScheme(signer=signer))
     import asyncio
