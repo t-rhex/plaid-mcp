@@ -18,6 +18,9 @@ from .config import Config
 from .link import complete_link, create_hosted_link
 from .server import build_server
 from .storage import Storage
+from .teller_cli import _build_provider as _build_teller_provider
+from .teller_cli import _read_enrollment as _read_teller_enrollment
+from .teller_cli import teller_group
 
 
 @click.group(invoke_without_command=True)
@@ -86,6 +89,30 @@ def list_cmd() -> None:
             f"- {i.get('institution_name') or '(unknown)'}  "
             f"item_id={i['item_id']}  products={i['products']}"
         )
+
+
+main.add_command(teller_group)
+
+
+@main.command("tui")
+def tui_cmd() -> None:
+    """Launch the Textual TUI to browse accounts and transactions.
+
+    Uses the saved Teller enrollment (``plaid-mcp teller connect``). If no
+    enrollment exists the TUI opens on an instructional empty screen.
+    """
+    from .tui import PlaidMcpTUI
+
+    cfg = Config.from_env()
+    enrollment = _read_teller_enrollment()
+
+    provider = _build_teller_provider(cfg) if enrollment is not None else None
+    try:
+        app = PlaidMcpTUI(provider=provider, enrollment=enrollment)
+        app.run()
+    finally:
+        if provider is not None:
+            provider.close()
 
 
 if __name__ == "__main__":
