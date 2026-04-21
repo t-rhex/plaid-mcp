@@ -9,10 +9,9 @@ from textual.widgets import Footer, Header, Static
 
 _MESSAGE = (
     "No enrollment saved.\n\n"
-    "Run this to link a bank through Teller Connect:\n\n"
-    "    plaid-mcp teller connect\n\n"
-    "Then relaunch the TUI with:\n\n"
-    "    plaid-mcp tui\n"
+    "Press [b]c[/b] to link a bank through Teller Connect right here,\n"
+    "or run this from another terminal:\n\n"
+    "    plaid-mcp teller connect\n"
 )
 
 

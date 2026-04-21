@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from plaid_mcp.config import Config
 from plaid_mcp.providers import (
     Account,
     Balance,
@@ -18,6 +19,7 @@ from plaid_mcp.providers import (
 )
 from plaid_mcp.tui import PlaidMcpTUI
 from plaid_mcp.tui.screens.accounts import AccountsScreen
+from plaid_mcp.tui.screens.connect import ConnectScreen
 from plaid_mcp.tui.screens.empty import EmptyScreen
 from plaid_mcp.tui.screens.transactions import TransactionsScreen
 
@@ -234,3 +236,130 @@ async def test_pressing_q_exits(
         await pilot.press("q")
         await pilot.pause()
         assert app._exit is True
+
+
+# ---- Connect flow tests ---------------------------------------------------
+
+
+@pytest.fixture
+def fake_config() -> Config:
+    """Minimal Config with Teller creds so ConnectScreen can mount."""
+    return Config(
+        client_id="test_client",
+        secret="test_secret",
+        provider="teller",
+        teller_application_id="app_test",
+        teller_env="sandbox",
+    )
+
+
+async def test_pressing_c_from_empty_pushes_connect_screen(
+    fake_config: Config,
+) -> None:
+    app = PlaidMcpTUI(provider=None, enrollment=None, config=fake_config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, EmptyScreen)
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ConnectScreen)
+
+
+async def test_connect_button_invokes_run_connect_flow_and_remounts_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+    accounts: list[Account],
+    balances: list[Balance],
+) -> None:
+    linked = Enrollment(
+        id="enr_new",
+        institution_id="ins_new",
+        institution_name="Chase",
+        access_token="fresh_token",
+        provider="teller",
+    )
+    calls: list[dict] = []
+
+    def fake_flow(cfg, *, on_status=None, **kwargs):
+        calls.append({"cfg": cfg, "kwargs": kwargs})
+        if on_status is not None:
+            on_status("Waiting for you to finish in the browser…")
+            on_status("Saving…")
+        return linked
+
+    # Monkeypatch on the origin module — ConnectScreen's worker imports it
+    # lazily, so this is the correct spelling.
+    import plaid_mcp.teller_cli as teller_cli
+
+    monkeypatch.setattr(teller_cli, "run_connect_flow", fake_flow)
+
+    new_provider = FakeProvider(accounts=accounts, balances=balances)
+
+    app = PlaidMcpTUI(
+        provider=None,
+        enrollment=None,
+        config=fake_config,
+        provider_factory=lambda _enr: new_provider,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ConnectScreen)
+
+        # Press the Connect button.
+        from textual.widgets import Button
+
+        button = app.screen.query_one("#connect-button", Button)
+        button.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        # The worker is thread=True so we need to wait for it.
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert len(calls) == 1
+        # Accounts screen should be the active screen now, populated by
+        # the new provider.
+        assert isinstance(app.screen, AccountsScreen)
+        from textual.widgets import DataTable
+
+        table = app.screen.query_one("#accounts-table", DataTable)
+        assert table.row_count == 2
+
+
+async def test_connect_flow_timeout_surfaces_error(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_config: Config,
+) -> None:
+    def fake_flow(cfg, *, on_status=None, **kwargs):
+        if on_status is not None:
+            on_status("Timed out waiting for Connect.")
+        return None
+
+    import plaid_mcp.teller_cli as teller_cli
+
+    monkeypatch.setattr(teller_cli, "run_connect_flow", fake_flow)
+
+    app = PlaidMcpTUI(provider=None, enrollment=None, config=fake_config)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause()
+        assert isinstance(app.screen, ConnectScreen)
+
+        from textual.widgets import Button, Static
+
+        button = app.screen.query_one("#connect-button", Button)
+        button.focus()
+        await pilot.pause()
+        await pilot.press("enter")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        # Still on ConnectScreen — user can retry.
+        assert isinstance(app.screen, ConnectScreen)
+        status = app.screen.query_one("#connect-status", Static)
+        assert "timed out" in str(status.render()).lower()
+        # Button is re-enabled for retry.
+        assert button.disabled is False
