@@ -19,7 +19,6 @@ from dotenv import load_dotenv
 
 from plaid_mcp.storage import Storage
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_TEST = REPO_ROOT / ".env.test"
 
@@ -27,6 +26,7 @@ ENV_TEST = REPO_ROOT / ".env.test"
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
     """Give every test fake credentials + an isolated DB, unless it's a sandbox test."""
+    monkeypatch.setenv("PROVIDER", "plaid")
     monkeypatch.setenv("PLAID_CLIENT_ID", "test_client_id")
     monkeypatch.setenv("PLAID_SECRET", "test_secret")
     monkeypatch.setenv("PLAID_ENV", "sandbox")

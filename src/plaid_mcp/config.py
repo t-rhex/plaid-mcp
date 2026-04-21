@@ -47,6 +47,14 @@ class Config:
     auth_token: str | None = None
     webhook_url: str | None = None
 
+    # Provider selection + Teller config. Plaid remains the default so the
+    # existing tools keep working; set PROVIDER=teller to switch.
+    provider: str = "plaid"
+    teller_application_id: str | None = None
+    teller_env: str = "sandbox"
+    teller_cert_path: Path | None = None
+    teller_key_path: Path | None = None
+
     @property
     def host(self) -> str:
         try:
@@ -57,10 +65,14 @@ class Config:
             ) from e
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
+        provider = os.getenv("PROVIDER", "plaid").strip().lower()
+
+        # Plaid creds are required only when PROVIDER=plaid. A Teller-only
+        # user shouldn't have to set them.
         client_id = os.getenv("PLAID_CLIENT_ID", "").strip()
         secret = os.getenv("PLAID_SECRET", "").strip()
-        if not client_id or not secret:
+        if provider == "plaid" and (not client_id or not secret):
             raise RuntimeError(
                 "PLAID_CLIENT_ID and PLAID_SECRET must be set. "
                 "Copy .env.example to .env and fill in your credentials."
@@ -87,6 +99,9 @@ class Config:
             if c.strip()
         ]
 
+        teller_cert = os.getenv("TELLER_CERT_PATH", "").strip()
+        teller_key = os.getenv("TELLER_KEY_PATH", "").strip()
+
         return cls(
             client_id=client_id,
             secret=secret,
@@ -98,6 +113,11 @@ class Config:
             db_path=_expand(os.getenv("PLAID_MCP_DB", "~/.plaid-mcp/plaid.db")),
             auth_token=os.getenv("MCP_AUTH_TOKEN") or None,
             webhook_url=os.getenv("PLAID_WEBHOOK_URL") or None,
+            provider=provider,
+            teller_application_id=os.getenv("TELLER_APPLICATION_ID") or None,
+            teller_env=os.getenv("TELLER_ENV", "sandbox").strip().lower(),
+            teller_cert_path=_expand(teller_cert) if teller_cert else None,
+            teller_key_path=_expand(teller_key) if teller_key else None,
         )
 
     def as_products(self):  # -> list[plaid.model.products.Products]
