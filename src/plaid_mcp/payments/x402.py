@@ -75,12 +75,18 @@ _USDC_ASSETS = {
 
 # EIP-712 domain info for the exact-EVM scheme. The facilitator uses
 # ``extra.name`` + ``extra.version`` to build the TransferWithAuthorization
-# typed-data hash; omitting them causes the facilitator to reject the
-# payload with ``invalid_exact_evm_missing_eip712_domain``. USDC on Base +
-# Base Sepolia both report name="USDC", version="2".
+# typed-data hash; omitting them (or getting them wrong) causes rejection
+# as ``invalid_exact_evm_missing_eip712_domain`` or a silent
+# ``invalid_payload`` on signature recovery.
+#
+# The values here are what Circle's USDC deployment reports on-chain via
+# ``name()`` and ``version()``. Base mainnet and Base Sepolia disagree on
+# the name string — mainnet is "USD Coin" (with space), Sepolia ships as
+# "USDC". Getting this wrong at the client side produces a signed payload
+# whose recovered address doesn't match authorization.from.
 _USDC_DOMAIN = {
-    "eip155:84532": {"name": "USDC", "version": "2"},
-    "eip155:8453":  {"name": "USDC", "version": "2"},
+    "eip155:84532": {"name": "USDC",     "version": "2"},  # Base Sepolia
+    "eip155:8453":  {"name": "USD Coin", "version": "2"},  # Base mainnet
 }
 
 # Friendly aliases → CAIP-2. The list is small on purpose — only
