@@ -55,6 +55,14 @@ class Config:
     teller_cert_path: Path | None = None
     teller_key_path: Path | None = None
 
+    # Payment gate (opt-in, HTTP transport only). Default "none" means
+    # the stdio + HTTP paths both stay free; set PAYWALL=x402 when
+    # hosting plaid-mcp commercially over HTTP.
+    paywall: str = "none"
+    x402_receiving_address: str | None = None
+    x402_network: str = "base-sepolia"
+    x402_facilitator_url: str | None = None
+
     @property
     def host(self) -> str:
         try:
@@ -102,6 +110,21 @@ class Config:
         teller_cert = os.getenv("TELLER_CERT_PATH", "").strip()
         teller_key = os.getenv("TELLER_KEY_PATH", "").strip()
 
+        paywall = os.getenv("PAYWALL", "none").strip().lower() or "none"
+        x402_receiving_address = os.getenv("X402_RECEIVING_ADDRESS", "").strip() or None
+        x402_network = os.getenv("X402_NETWORK", "base-sepolia").strip().lower() or "base-sepolia"
+        x402_facilitator_url = os.getenv("X402_FACILITATOR_URL", "").strip() or None
+
+        if paywall == "x402" and not x402_receiving_address:
+            raise RuntimeError(
+                "PAYWALL=x402 requires X402_RECEIVING_ADDRESS to be set to the "
+                "Base wallet address that should receive USDC payments."
+            )
+        if paywall not in {"none", "x402"}:
+            raise RuntimeError(
+                f"PAYWALL must be 'none' or 'x402' (got {paywall!r})."
+            )
+
         return cls(
             client_id=client_id,
             secret=secret,
@@ -118,6 +141,10 @@ class Config:
             teller_env=os.getenv("TELLER_ENV", "sandbox").strip().lower(),
             teller_cert_path=_expand(teller_cert) if teller_cert else None,
             teller_key_path=_expand(teller_key) if teller_key else None,
+            paywall=paywall,
+            x402_receiving_address=x402_receiving_address,
+            x402_network=x402_network,
+            x402_facilitator_url=x402_facilitator_url,
         )
 
     def as_products(self):  # -> list[plaid.model.products.Products]

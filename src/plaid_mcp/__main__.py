@@ -16,6 +16,7 @@ import click
 
 from .config import Config
 from .link import complete_link, create_hosted_link
+from .payments import build_gate
 from .providers import Enrollment, build_provider
 from .server import build_server
 from .storage import Storage
@@ -37,10 +38,26 @@ def main(ctx: click.Context) -> None:
 @click.option("--port", default=8080, type=int, help="Port")
 @click.option("--transport", default="http", help="http | sse | streamable-http")
 def serve(host: str, port: int, transport: str) -> None:
-    """Run the MCP server over HTTP for remote clients (Claude web, ChatGPT)."""
+    """Run the MCP server over HTTP for remote clients (Claude web, ChatGPT).
+
+    When ``PAYWALL=x402`` is set, wraps the Starlette app with an x402
+    payment gate so every ``tools/call`` JSON-RPC request is metered.
+    """
+    import uvicorn
+
+    config = Config.from_env()
     server = build_server()
+    gate = build_gate(config)
+
+    # Extract FastMCP's Starlette app and wrap it with the gate. When
+    # PAYWALL=none the gate is a pass-through so this has zero overhead.
+    app = server.http_app(transport=transport)
+    wrapped = gate.asgi_middleware(app)
+
+    if gate.name != "noop":
+        click.echo(f"plaid-mcp payment gate: {gate.name}")
     click.echo(f"plaid-mcp listening on {host}:{port} ({transport})")
-    server.run(transport=transport, host=host, port=port)
+    uvicorn.run(wrapped, host=host, port=port, log_level="info")
 
 
 @main.command("link")

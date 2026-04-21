@@ -693,6 +693,15 @@ wheels = [
 ]
 
 [[package]]
+name = "nest-asyncio"
+version = "1.6.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/83/f8/51569ac65d696c8ecbee95938f89d4abf00f47d58d48f6fbabfe8f0baefe/nest_asyncio-1.6.0.tar.gz", hash = "sha256:6f172d5449aca15afd6c646851f4e31e02c598d553a667e38cafa997cfec55fe", size = 7418, upload-time = "2024-01-21T14:25:19.227Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a0/c4/c2971a3ba4c6103a3d10c4b0f24f461ddc027f0f09763220cf35ca1401b3/nest_asyncio-1.6.0-py3-none-any.whl", hash = "sha256:87af6efd6b5e897c81050477ef65c62e2b2f35d51703cae01aff2905b1852e1c", size = 5195, upload-time = "2024-01-21T14:25:17.223Z" },
+]
+
+[[package]]
 name = "nulltype"
 version = "2.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -756,6 +765,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "textual" },
+    { name = "x402" },
 ]
 
 [package.optional-dependencies]
@@ -777,6 +787,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "textual", specifier = ">=0.80" },
+    { name = "x402", specifier = ">=2.8.0,<3" },
 ]
 provides-extras = ["dev"]
 
@@ -1722,6 +1733,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a5/8f/aea9c71cc92bf9b6cc0f7f70df8f0b420636b6c96ef4feee1e16f80f75dd/websockets-16.0-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:0298d07ee155e2e9fda5be8a9042200dd2e3bb0b8a38482156576f863a9d457c", size = 176968, upload-time = "2026-01-10T09:23:41.031Z" },
     { url = "https://files.pythonhosted.org/packages/9a/3f/f70e03f40ffc9a30d817eef7da1be72ee4956ba8d7255c399a01b135902a/websockets-16.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:a653aea902e0324b52f1613332ddf50b00c06fdaf7e92624fbf8c77c78fa5767", size = 178735, upload-time = "2026-01-10T09:23:42.259Z" },
     { url = "https://files.pythonhosted.org/packages/6f/28/258ebab549c2bf3e64d2b0217b973467394a9cea8c42f70418ca2c5d0d2e/websockets-16.0-py3-none-any.whl", hash = "sha256:1637db62fad1dc833276dded54215f2c7fa46912301a24bd94d45d46a011ceec", size = 171598, upload-time = "2026-01-10T09:23:45.395Z" },
+]
+
+[[package]]
+name = "x402"
+version = "2.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nest-asyncio" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1d/8b/06c7131204107a92e3cad0c06624a53b9f85b037706e5556c75760350a8e/x402-2.8.0.tar.gz", hash = "sha256:a39b39173b65581edbe221caeb76553d4cd8240da07099440cc009b9dcd86b7f", size = 1049266, upload-time = "2026-04-17T18:02:49.402Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d9/c2/c5c190bfe9e2b93e350cc3b950bd23c9ec41463e12f3dcb6f9380e473572/x402-2.8.0-py3-none-any.whl", hash = "sha256:0d33becdcc498bf4c7d16ea42bc45698888bb48ac5c7c1453ea53c4a56f8e666", size = 1121990, upload-time = "2026-04-17T18:02:47.43Z" },
 ]
 
 [[package]]
