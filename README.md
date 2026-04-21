@@ -52,25 +52,32 @@ All access tokens and cached transactions live in SQLite at `~/.plaid-mcp/plaid.
 
 ## Quick start
 
+The easiest install is [`pipx`](https://pypa.github.io/pipx/) or [`uv tool`](https://docs.astral.sh/uv/guides/tools/) — both put `plaid-mcp` on your `PATH` in an isolated venv.
+
 ```bash
-# 1. Get the code
-git clone https://github.com/YOUR_USER/plaid-mcp
-cd plaid-mcp
+# 1. Install (pick one)
+pipx install plaid-mcp             # or: uv tool install plaid-mcp
+                                   # or: pip install plaid-mcp
 
-# 2. Install (Python 3.10+)
-uv sync                    # or: pip install -e .
+# 2. Configure — any of these work:
+#    a) ~/.plaid-mcp/.env
+#    b) project-local .env (if you're running from a clone)
+#    c) inline env vars in your MCP client config (see "Claude Desktop" below)
+mkdir -p ~/.plaid-mcp && cat > ~/.plaid-mcp/.env <<EOF
+PLAID_CLIENT_ID=your_client_id
+PLAID_SECRET=your_secret
+PLAID_ENV=production
+EOF
 
-# 3. Configure
-cp .env.example .env
-$EDITOR .env               # fill in PLAID_CLIENT_ID and PLAID_SECRET
+# 3. Link your first bank in the browser
+plaid-mcp link
 
-# 4. Link your first bank in the browser
-uv run python -m plaid_mcp link
-
-# 5. Wire it into Claude Desktop (see below) and ask:
+# 4. Wire it into Claude Desktop (see below) and ask:
 #    "list my accounts"
 #    "sync my transactions then summarize spending last month"
 ```
+
+Prefer to run from source? See [Development](#development).
 
 Total setup time if you already have Plaid credentials: ~5 minutes.
 
@@ -90,13 +97,23 @@ You need your **own** Plaid developer account — don't share a `client_id` or r
 
 ### 2. Install
 
+Choose whichever you prefer — all three drop a `plaid-mcp` executable on your `PATH`:
+
 ```bash
-git clone https://github.com/YOUR_USER/plaid-mcp
-cd plaid-mcp
-uv sync          # recommended; or: pip install -e .
+pipx install plaid-mcp            # isolated venv, recommended
+uv tool install plaid-mcp         # same idea, uv-native
+pip install plaid-mcp             # into your current env
 ```
 
-Requires Python 3.10+. `uv` is not required but strongly recommended — it manages the virtualenv for you.
+Or from source (for development or running unreleased changes):
+
+```bash
+git clone https://github.com/t-rhex/plaid-mcp
+cd plaid-mcp
+uv sync                           # or: pip install -e .
+```
+
+Requires Python 3.10+.
 
 ### 3. Configure
 
@@ -151,7 +168,30 @@ You can also link new accounts directly from inside Claude/ChatGPT after the ser
 
 ### Claude Desktop (local, stdio)
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS or `%APPDATA%\Claude\claude_desktop_config.json` on Windows:
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS or `%APPDATA%\Claude\claude_desktop_config.json` on Windows.
+
+**If you installed via pipx / uv tool / pip** (recommended):
+
+```json
+{
+  "mcpServers": {
+    "plaid": {
+      "command": "plaid-mcp",
+      "env": {
+        "PLAID_CLIENT_ID": "<your client_id>",
+        "PLAID_SECRET": "<your secret>",
+        "PLAID_ENV": "production",
+        "PLAID_PRODUCTS": "transactions",
+        "PLAID_OPTIONAL_PRODUCTS": "investments,liabilities,identity"
+      }
+    }
+  }
+}
+```
+
+If `plaid-mcp` isn't found on Claude Desktop's PATH, use the absolute path that `which plaid-mcp` prints.
+
+**If you're running from a clone**:
 
 ```json
 {

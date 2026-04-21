@@ -6,7 +6,23 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "plaid-mcp contributors" }]
-keywords = ["plaid", "mcp", "claude", "finance", "llm"]
+keywords = ["plaid", "mcp", "claude", "chatgpt", "finance", "llm", "fintech"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 
 dependencies = [
     "fastmcp>=2.2.0",
@@ -23,6 +39,12 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/t-rhex/plaid-mcp"
+Repository = "https://github.com/t-rhex/plaid-mcp"
+Issues = "https://github.com/t-rhex/plaid-mcp/issues"
+Changelog = "https://github.com/t-rhex/plaid-mcp/releases"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
