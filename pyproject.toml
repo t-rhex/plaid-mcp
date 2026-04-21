@@ -1,0 +1,49 @@
+[project]
+name = "plaid-mcp"
+version = "0.1.0"
+description = "Read-only MCP server for analyzing Plaid-connected accounts from Claude or ChatGPT."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "plaid-mcp contributors" }]
+keywords = ["plaid", "mcp", "claude", "finance", "llm"]
+
+dependencies = [
+    "fastmcp>=2.2.0",
+    "plaid-python>=36.0.0",
+    "pydantic>=2.6",
+    "python-dotenv>=1.0",
+    "httpx>=0.27",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "sandbox: tests that hit the real Plaid sandbox API (skipped without .env.test)",
+]
+testpaths = ["tests"]
+
+[project.scripts]
+plaid-mcp = "plaid_mcp.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plaid_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]

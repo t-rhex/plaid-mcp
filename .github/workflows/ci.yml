@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit:
+    name: Unit + MCP smoke tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Run unit + smoke tests
+        run: uv run pytest -v -m "not sandbox"
+
+  sandbox:
+    name: Plaid sandbox integration
+    runs-on: ubuntu-latest
+    # Only run when sandbox creds are configured in repo secrets.
+    # To enable: Settings → Secrets and variables → Actions →
+    #   PLAID_CLIENT_ID_SANDBOX and PLAID_SECRET_SANDBOX
+    if: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: unit
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for sandbox credentials
+        id: creds
+        env:
+          PLAID_CLIENT_ID_SANDBOX: ${{ secrets.PLAID_CLIENT_ID_SANDBOX }}
+        run: |
+          if [ -n "$PLAID_CLIENT_ID_SANDBOX" ]; then
+            echo "has_creds=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_creds=false" >> $GITHUB_OUTPUT
+            echo "Sandbox credentials not configured; skipping."
+          fi
+
+      - name: Install uv
+        if: steps.creds.outputs.has_creds == 'true'
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        if: steps.creds.outputs.has_creds == 'true'
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        if: steps.creds.outputs.has_creds == 'true'
+        run: uv sync --extra dev
+
+      - name: Write .env.test
+        if: steps.creds.outputs.has_creds == 'true'
+        env:
+          PLAID_CLIENT_ID: ${{ secrets.PLAID_CLIENT_ID_SANDBOX }}
+          PLAID_SECRET: ${{ secrets.PLAID_SECRET_SANDBOX }}
+        run: |
+          cat > .env.test <<EOF
+          PLAID_CLIENT_ID=$PLAID_CLIENT_ID
+          PLAID_SECRET=$PLAID_SECRET
+          PLAID_ENV=sandbox
+          EOF
+
+      - name: Run sandbox integration tests
+        if: steps.creds.outputs.has_creds == 'true'
+        run: uv run pytest -v -m sandbox
