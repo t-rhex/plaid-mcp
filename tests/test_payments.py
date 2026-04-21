@@ -890,10 +890,30 @@ def test_x402_live_base_mainnet_payment_round_trip(fake_mcp_app: Starlette) -> N
         "X402_MAINNET_RECEIVING_ADDRESS", signer.address
     )
 
+    # CDP facilitator: x402.org/facilitator is testnet-only. Mainnet
+    # settlement requires an authenticated facilitator; Coinbase's CDP
+    # runs one at api.cdp.coinbase.com and ``cdp.x402`` bundles a
+    # JWT-signing FacilitatorConfig helper. CDP API creds go in
+    # CDP_API_KEY_ID + CDP_API_KEY_SECRET env vars.
+    cdp_key_id = os.getenv("CDP_API_KEY_ID", "").strip()
+    cdp_key_secret = os.getenv("CDP_API_KEY_SECRET", "").strip()
+    if not (cdp_key_id and cdp_key_secret):
+        pytest.skip(
+            "CDP_API_KEY_ID / CDP_API_KEY_SECRET not set — x402.org's "
+            "default facilitator is testnet-only; mainnet needs CDP auth."
+        )
+
+    from cdp.x402 import create_facilitator_config
+    from x402.http import HTTPFacilitatorClient
+
+    cdp_cfg = create_facilitator_config(cdp_key_id, cdp_key_secret)
+    cdp_facilitator = HTTPFacilitatorClient(cdp_cfg)
+
     gate = X402Gate(
         receiving_address=receiver,
         network="base",
         prices=PriceTable(prices={}, default_cents=1),
+        facilitator=cdp_facilitator,
     )
     client = TestClient(gate.asgi_middleware(fake_mcp_app))
     rpc = {

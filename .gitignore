@@ -6,6 +6,13 @@
 *.sqlite
 *.sqlite3
 
+# Never commit credential bundles. Catches stray CDP / Teller keys
+# that drop into the repo root via the browser.
+*api_key*.json
+*api_key*.pem
+cdp_*.json
+teller.zip
+
 __pycache__/
 *.py[cod]
 *$py.class

@@ -144,6 +144,18 @@ wheels = [
 ]
 
 [[package]]
+name = "aiohttp-retry"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/61/ebda4d8e3d8cfa1fd3db0fb428db2dd7461d5742cea35178277ad180b033/aiohttp_retry-2.9.1.tar.gz", hash = "sha256:8eb75e904ed4ee5c2ec242fefe85bf04240f685391c4879d8f541d6028ff01f1", size = 13608, upload-time = "2024-11-06T10:44:54.574Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/99/84ba7273339d0f3dfa57901b846489d2e5c2cd731470167757f1935fffbd/aiohttp_retry-2.9.1-py3-none-any.whl", hash = "sha256:66d2759d1921838256a05a3f80ad7e724936f083e35be5abb5e16eed6be6dc54", size = 9981, upload-time = "2024-11-06T10:44:52.917Z" },
+]
+
+[[package]]
 name = "aiosignal"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -226,6 +238,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/86/72/cd9b395f25e290e633655a100af28cb253e4393396264a98bd5f5951d50f/backports_tarfile-1.2.0.tar.gz", hash = "sha256:d75e02c268746e1b8144c278978b6e98e85de6ad16f8e4b0844a154557eca991", size = 86406, upload-time = "2024-05-28T17:01:54.731Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b9/fa/123043af240e49752f1c4bd24da5053b6bd00cad78c2be53c0d1e8b975bc/backports.tarfile-1.2.0-py3-none-any.whl", hash = "sha256:77e284d754527b01fb1e6fa8a1afe577858ebe4e9dad8919e34c862cb399bc34", size = 30181, upload-time = "2024-05-28T17:01:53.112Z" },
+]
+
+[[package]]
+name = "base58"
+version = "2.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7f/45/8ae61209bb9015f516102fa559a2914178da1d5868428bd86a1b4421141d/base58-2.1.1.tar.gz", hash = "sha256:c5d0cb3f5b6e81e8e35da5754388ddcc6d0d14b6c6a132cb93d69ed580a7278c", size = 6528, upload-time = "2021-10-30T22:12:17.858Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/45/ec96b29162a402fc4c1c5512d114d7b3787b9d1c2ec241d9568b4816ee23/base58-2.1.1-py3-none-any.whl", hash = "sha256:11a36f4d3ce51dfc1043f3218591ac4eb1ceb172919cebe05b52a5bcc8d245c2", size = 5621, upload-time = "2021-10-30T22:12:16.658Z" },
 ]
 
 [[package]]
@@ -359,6 +380,28 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/87/a4/e534cf7d2d0e8d880e25dd61e8d921ffcfe15bd696734589826f5a2df727/caio-0.9.25-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:628a630eb7fb22381dd8e3c8ab7f59e854b9c806639811fc3f4310c6bd711d79", size = 81565, upload-time = "2026-03-04T22:08:27.483Z" },
     { url = "https://files.pythonhosted.org/packages/3f/ed/bf81aeac1d290017e5e5ac3e880fd56ee15e50a6d0353986799d1bc5cfd5/caio-0.9.25-cp314-cp314-manylinux_2_34_x86_64.whl", hash = "sha256:0ba16aa605ccb174665357fc729cf500679c2d94d5f1458a6f0d5ca48f2060a7", size = 80071, upload-time = "2026-03-04T22:08:28.751Z" },
     { url = "https://files.pythonhosted.org/packages/86/93/1f76c8d1bafe3b0614e06b2195784a3765bbf7b0a067661af9e2dd47fc33/caio-0.9.25-py3-none-any.whl", hash = "sha256:06c0bb02d6b929119b1cfbe1ca403c768b2013a369e2db46bfa2a5761cf82e40", size = 19087, upload-time = "2025-12-26T15:22:00.221Z" },
+]
+
+[[package]]
+name = "cdp-sdk"
+version = "1.43.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "aiohttp-retry" },
+    { name = "base58" },
+    { name = "cryptography" },
+    { name = "pydantic" },
+    { name = "pyjwt" },
+    { name = "python-dateutil" },
+    { name = "solana" },
+    { name = "solders" },
+    { name = "urllib3" },
+    { name = "web3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/06/d5/f2bedf2afb89cb36d34b42d865752391c7806985817c8b6dc414f9f05801/cdp_sdk-1.43.0.tar.gz", hash = "sha256:79a594f3e1d86af4be90d7238d4e54e20e4633e716f30f14c28514f7d7a198d7", size = 398217, upload-time = "2026-04-20T16:25:24.528Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/be/a9/e44e29b1be78637e2828119eb92a35bf18d91b9ff1a516fbdaef95efa26d/cdp_sdk-1.43.0-py3-none-any.whl", hash = "sha256:763d84a154d53dd54f15eeba2f397e21133f2fd7699cafb65f867ec4eee22293", size = 1029680, upload-time = "2026-04-20T16:25:22.36Z" },
 ]
 
 [[package]]
@@ -632,6 +675,28 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "construct"
+version = "2.10.70"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/02/77/8c84b98eca70d245a2a956452f21d57930d22ab88cbeed9290ca630cf03f/construct-2.10.70.tar.gz", hash = "sha256:4d2472f9684731e58cc9c56c463be63baa1447d674e0d66aeb5627b22f512c29", size = 86337, upload-time = "2023-11-29T08:44:49.545Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/fb/08b3f4bf05da99aba8ffea52a558758def16e8516bc75ca94ff73587e7d3/construct-2.10.70-py3-none-any.whl", hash = "sha256:c80be81ef595a1a821ec69dc16099550ed22197615f4320b57cc9ce2a672cb30", size = 63020, upload-time = "2023-11-29T08:44:46.876Z" },
+]
+
+[[package]]
+name = "construct-typing"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "construct" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f6/ae/659fe4866d89ef5a3a65cddbdd7b35882f4feb72db383821965f2fcea934/construct_typing-0.7.0.tar.gz", hash = "sha256:71d110dedff39bd3b603c734077032a7065bc597a49db1f5b03a211d05dbac23", size = 45104, upload-time = "2025-10-27T19:30:29.614Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/0c/2db6f7e1ae9795e436c6a0dc0bc38b12b8c8a228cb63203e24190b755b3b/construct_typing-0.7.0-py3-none-any.whl", hash = "sha256:c92383c6e8e5d07ba25811c8d5163820458d821e73bb1006541f43f89788646c", size = 24350, upload-time = "2025-10-27T19:30:27.505Z" },
 ]
 
 [[package]]
@@ -1351,6 +1416,15 @@ wheels = [
 ]
 
 [[package]]
+name = "jsonalias"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ec/45/ee7e17002cb7f3264f755ff6a1a72c55d1830e07808d643167d2a2277c4f/jsonalias-0.1.1.tar.gz", hash = "sha256:64f04d935397d579fc94509e1fcb6212f2d081235d9d6395bd10baedf760a769", size = 1095, upload-time = "2022-10-28T22:57:56.224Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/ed/05aebce69f78c104feff2ffcdd5a6f9d668a208aba3a8bf56e3750809fd8/jsonalias-0.1.1-py3-none-any.whl", hash = "sha256:a56d2888e6397812c606156504e861e8ec00e188005af149f003c787db3d3f18", size = 1312, upload-time = "2022-10-28T22:57:54.763Z" },
+]
+
+[[package]]
 name = "jsonref"
 version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1729,6 +1803,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+cdp = [
+    { name = "cdp-sdk" },
+]
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1737,6 +1814,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cdp-sdk", marker = "extra == 'cdp'", specifier = ">=1.43,<2" },
     { name = "click", specifier = ">=8.1" },
     { name = "fastmcp", specifier = ">=2.2.0" },
     { name = "httpx", specifier = ">=0.27" },
@@ -1749,7 +1827,7 @@ requires-dist = [
     { name = "textual", specifier = ">=0.80" },
     { name = "x402", extras = ["evm"], specifier = ">=2.8.0,<3" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["dev", "cdp"]
 
 [[package]]
 name = "plaid-python"
@@ -2669,6 +2747,42 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "solana"
+version = "0.36.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "construct-typing" },
+    { name = "httpx" },
+    { name = "solders" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5e/66/b8cd6e4d95bfe46798942ace31935e7799005a4e2180869dc7bac6b75be9/solana-0.36.11.tar.gz", hash = "sha256:2fdcf483674f4b88fe6510524bf3234a5837d19fe1815aa5a285f2739d28b3a3", size = 54516, upload-time = "2026-01-03T02:11:52.243Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/8d/807eebf0560759ad90464060e0d1d87ff5409beb6ed56104c553a83a976a/solana-0.36.11-py3-none-any.whl", hash = "sha256:1d659decc67a40ee1e9b5ded373a076b87cf3b4bd0645e120d16d9348c2025ba", size = 64786, upload-time = "2026-01-03T02:11:50.811Z" },
+]
+
+[[package]]
+name = "solders"
+version = "0.27.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jsonalias" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/25/80a81bb3dc4c70329dd0016edbdfbf2e8d8300a98ab9cd1a6ea0266bda7c/solders-0.27.1.tar.gz", hash = "sha256:7d8a24ad2f193afcdc02d6f3975917a7358b0f0ab7f4b3695b135ff2008222c8", size = 180923, upload-time = "2025-11-15T07:50:52.32Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4b/6b/0c0ee4766705824261779d00229fb95308d6b28422613e0e2af577f60ee3/solders-0.27.1-cp38-abi3-macosx_10_9_x86_64.macosx_11_0_arm64.macosx_10_9_universal2.whl", hash = "sha256:4dcd8e766bab24afbe9e0ae363d86f9810457e04b00c8a9149f69ca939ed587c", size = 24883435, upload-time = "2025-11-15T07:50:34.42Z" },
+    { url = "https://files.pythonhosted.org/packages/33/1c/be04a1b26e18c409dd006d214198dc03f0b657c1cb34f4c83b763f8348f0/solders-0.27.1-cp38-abi3-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:5d87b145cc0129095f9cff8c7f28d2e910bc5b5a4cf257c263b08a4b95f111dd", size = 6480729, upload-time = "2025-11-15T07:50:37.323Z" },
+    { url = "https://files.pythonhosted.org/packages/48/03/98dc73c266b11ed5c13b3933510a1aa115becf97f45bec1a22da9d03ffa9/solders-0.27.1-cp38-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6082bbe46b7b1b2b005d046011f89fcae75fc5ea4f1a0ef5c2e9dfb5fe7930ce", size = 12744782, upload-time = "2025-11-15T07:50:39.283Z" },
+    { url = "https://files.pythonhosted.org/packages/a0/39/35384d8fb80d05937bd9e8af7237cfe3f0d017c8aba357209d90d428f3a0/solders-0.27.1-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:ccb821c2e4af43d976f312086f248a67352b3986e5f4c87af41cfeac6d8b5683", size = 6601257, upload-time = "2025-11-15T07:50:41.738Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/65/8989e521142473bf1130613476a4449e106bb97ed6cc86097f6f519b1234/solders-0.27.1-cp38-abi3-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:663a10566ae81f67c4515d4db5fbf51b735204741728c1a5cde11c4e019a51df", size = 7277802, upload-time = "2025-11-15T07:50:43.789Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/41/87ecf12cec0e7aa9c67b0cf1b8079fb28aa0af91e97328a3bd0c5e3001ba/solders-0.27.1-cp38-abi3-musllinux_1_2_i686.whl", hash = "sha256:d14f05a77dbbf7966fb26f255c81302e6127550bdb66c2fdc99f522043fdf376", size = 7082541, upload-time = "2025-11-15T07:50:45.847Z" },
+    { url = "https://files.pythonhosted.org/packages/33/b9/35e6f59b41bb205b26c7318fcdca43f3d59464fd3ddc13d36f36427f64d4/solders-0.27.1-cp38-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:f778eeab411acec0a765a01c7b772f8eca8a8543d98276bd83cb826960da211b", size = 6845568, upload-time = "2025-11-15T07:50:47.698Z" },
+    { url = "https://files.pythonhosted.org/packages/9b/f3/14ed12d8d5047ababaca3271f82ebbf500ff74b6358f283962232103a12d/solders-0.27.1-cp38-abi3-win_amd64.whl", hash = "sha256:f3b787c29570a46d219c7a67543d8b0fadc73abda346653aa20e8eccd839e78b", size = 5295092, upload-time = "2025-11-15T07:50:50.517Z" },
 ]
 
 [[package]]

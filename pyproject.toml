@@ -41,6 +41,11 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
 ]
+# Coinbase CDP facilitator support — needed for x402 on Base mainnet.
+# Install with `uv sync --extra cdp` (or `pip install "plaid-mcp[cdp]"`).
+cdp = [
+    "cdp-sdk>=1.43,<2",
+]
 
 [project.urls]
 Homepage = "https://github.com/t-rhex/plaid-mcp"
