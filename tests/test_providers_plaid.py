@@ -194,6 +194,20 @@ def test_get_transactions_returns_cached_storage_rows(tmp_db):
     assert by_id["tx_a"].merchant_name == "Coffee Shop"
 
 
+def test_get_transactions_round_trips_raw_blob(tmp_db):
+    """The cached ``raw`` JSON should resurface on Transaction.raw so callers
+    that care about Plaid-native fields (e.g. counterparties, location) can
+    reach past the normalized shape."""
+    enrollment = _seed_item(tmp_db)
+    _cache_tx(tmp_db, "item_1", "acct_1", "tx_a", "2026-03-10", 12.50)
+
+    p = PlaidProvider(tmp_db, _config())
+    [tx] = p.get_transactions(enrollment, "2026-03-01", "2026-03-31")
+    assert tx.raw != {}
+    assert tx.raw["transaction_id"] == "tx_a"
+    assert tx.raw["personal_finance_category"]["primary"] == "FOOD_AND_DRINK"
+
+
 def test_get_transactions_filter_by_account(tmp_db):
     enrollment = _seed_item(tmp_db)
     _cache_tx(tmp_db, "item_1", "acct_1", "tx_a", "2026-03-10", 12.50)

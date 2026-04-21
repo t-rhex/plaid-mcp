@@ -18,9 +18,7 @@ import pytest
 from plaid_mcp import tools_transactions as tt
 from plaid_mcp import tools_wealth as tw
 from plaid_mcp.client import get_client
-from plaid_mcp.config import Config
 from plaid_mcp.storage import Storage
-
 
 pytestmark = pytest.mark.sandbox
 

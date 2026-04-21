@@ -61,9 +61,18 @@ def mock_plaid_client(monkeypatch) -> MagicMock:
         mock_plaid_client.accounts_get.return_value = {"accounts": [...]}
     """
     client = MagicMock(name="plaid_client")
-    # Patch in all the modules that import get_client.
-    for module in ("plaid_mcp.client", "plaid_mcp.link",
-                   "plaid_mcp.tools_transactions", "plaid_mcp.tools_wealth"):
+    # Patch in all the modules that resolve get_client at call time. The
+    # providers/plaid.py module imports `plaid_mcp.client` as a module and
+    # calls ``client_mod.get_client()``, so patching the attribute on the
+    # `client` module covers it — but we include it explicitly anyway so
+    # future refactors that import the name directly are caught.
+    for module in (
+        "plaid_mcp.client",
+        "plaid_mcp.link",
+        "plaid_mcp.tools_transactions",
+        "plaid_mcp.tools_wealth",
+        "plaid_mcp.providers.plaid",
+    ):
         monkeypatch.setattr(f"{module}.get_client", lambda: client, raising=False)
     return client
 

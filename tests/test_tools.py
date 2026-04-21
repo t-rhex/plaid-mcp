@@ -268,7 +268,11 @@ def test_get_liabilities_separates_categories(linked_item, mock_plaid_client):
                     "last_statement_balance": 500.0,
                     "minimum_payment_amount": 25.0,
                     "aprs": [
-                        {"apr_type": "purchase", "apr_percentage": 19.99, "balance_subject_to_apr": 500}
+                        {
+                            "apr_type": "purchase",
+                            "apr_percentage": 19.99,
+                            "balance_subject_to_apr": 500,
+                        },
                     ],
                 })
             ],

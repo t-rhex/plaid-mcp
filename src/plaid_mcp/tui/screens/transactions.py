@@ -33,6 +33,15 @@ class TransactionsScreen(Screen[None]):
         padding: 0 1;
         color: $text-muted;
     }
+    TransactionsScreen #tx-error {
+        padding: 0 1;
+        color: $error;
+        background: $error 15%;
+        display: none;
+    }
+    TransactionsScreen #tx-error.-visible {
+        display: block;
+    }
     TransactionsScreen DataTable {
         height: 1fr;
     }
@@ -61,6 +70,7 @@ class TransactionsScreen(Screen[None]):
             f"Transactions — {start.isoformat()} → {end.isoformat()}",
             id="tx-title",
         )
+        yield Static("", id="tx-error")
         table: DataTable[str] = DataTable(zebra_stripes=True, cursor_type="row")
         table.id = "tx-table"
         yield table
@@ -73,7 +83,18 @@ class TransactionsScreen(Screen[None]):
     def action_refresh(self) -> None:
         self._refresh()
 
+    def _show_error(self, message: str) -> None:
+        banner = self.query_one("#tx-error", Static)
+        banner.update(f"⚠ {message}")
+        banner.add_class("-visible")
+
+    def _clear_error(self) -> None:
+        banner = self.query_one("#tx-error", Static)
+        banner.update("")
+        banner.remove_class("-visible")
+
     def _refresh(self) -> None:
+        self._clear_error()
         table = self.query_one("#tx-table", DataTable)
         footer = self.query_one("#tx-footer", Static)
         table.clear(columns=True)
@@ -98,6 +119,7 @@ class TransactionsScreen(Screen[None]):
     def _load_transactions(self) -> list[Transaction]:
         caps = self._provider.capabilities()
         if Capability.TRANSACTIONS not in caps:
+            self._show_error("Provider does not support transactions.")
             return []
         end = date.today()
         start = end - timedelta(days=self._days)
@@ -109,5 +131,6 @@ class TransactionsScreen(Screen[None]):
                     end_date=end.isoformat(),
                 )
             )
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - surface upstream error, don't crash
+            self._show_error(f"Could not load transactions: {e}")
             return []

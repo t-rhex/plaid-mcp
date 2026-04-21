@@ -15,6 +15,11 @@ def _iter_items(storage: Storage):
             yield item, token
 
 
+def _date_str(d: Any) -> str | None:
+    """Stringify a date-ish Plaid field, or None when the field is missing."""
+    return str(d) if d else None
+
+
 # ---- Investments ----------------------------------------------------------------
 
 
@@ -155,9 +160,9 @@ def get_liabilities(storage: Storage) -> dict[str, Any]:
                     "institution_name": item.get("institution_name"),
                     "last_statement_balance": cc.get("last_statement_balance"),
                     "last_payment_amount": cc.get("last_payment_amount"),
-                    "last_payment_date": str(cc.get("last_payment_date")) if cc.get("last_payment_date") else None,
+                    "last_payment_date": _date_str(cc.get("last_payment_date")),
                     "minimum_payment_amount": cc.get("minimum_payment_amount"),
-                    "next_payment_due_date": str(cc.get("next_payment_due_date")) if cc.get("next_payment_due_date") else None,
+                    "next_payment_due_date": _date_str(cc.get("next_payment_due_date")),
                     "aprs": [
                         {
                             "type": a.get("apr_type"),
@@ -177,12 +182,12 @@ def get_liabilities(storage: Storage) -> dict[str, Any]:
                     "institution_name": item.get("institution_name"),
                     "outstanding_balance": sl.get("outstanding_balance"),
                     "origination_principal": sl.get("origination_principal_amount"),
-                    "origination_date": str(sl.get("origination_date")) if sl.get("origination_date") else None,
+                    "origination_date": _date_str(sl.get("origination_date")),
                     "interest_rate_percentage": sl.get("interest_rate_percentage"),
                     "loan_status": (sl.get("loan_status") or {}).get("type"),
                     "minimum_payment_amount": sl.get("minimum_payment_amount"),
-                    "next_payment_due_date": str(sl.get("next_payment_due_date")) if sl.get("next_payment_due_date") else None,
-                    "expected_payoff_date": str(sl.get("expected_payoff_date")) if sl.get("expected_payoff_date") else None,
+                    "next_payment_due_date": _date_str(sl.get("next_payment_due_date")),
+                    "expected_payoff_date": _date_str(sl.get("expected_payoff_date")),
                     "servicer": sl.get("servicer_address"),
                 }
             )
@@ -194,13 +199,14 @@ def get_liabilities(storage: Storage) -> dict[str, Any]:
                     "account_id": m.get("account_id"),
                     "institution_name": item.get("institution_name"),
                     "origination_principal": m.get("origination_principal_amount"),
-                    "origination_date": str(m.get("origination_date")) if m.get("origination_date") else None,
-                    "interest_rate_percentage": (m.get("interest_rate") or {}).get("percentage"),
+                    "origination_date": _date_str(m.get("origination_date")),
+                    "interest_rate_percentage":
+                        (m.get("interest_rate") or {}).get("percentage"),
                     "interest_rate_type": (m.get("interest_rate") or {}).get("type"),
                     "loan_term": m.get("loan_term"),
-                    "maturity_date": str(m.get("maturity_date")) if m.get("maturity_date") else None,
+                    "maturity_date": _date_str(m.get("maturity_date")),
                     "next_monthly_payment": m.get("next_monthly_payment"),
-                    "next_payment_due_date": str(m.get("next_payment_due_date")) if m.get("next_payment_due_date") else None,
+                    "next_payment_due_date": _date_str(m.get("next_payment_due_date")),
                     "past_due_amount": m.get("past_due_amount"),
                 }
             )
@@ -307,8 +313,8 @@ def get_income(storage: Storage) -> dict[str, Any]:
                         "pay_frequency": stream.get("pay_frequency"),
                         "total_amount": stream.get("total_amount"),
                         "average_monthly": stream.get("average_monthly_income_amount"),
-                        "start_date": str(stream.get("start_date")) if stream.get("start_date") else None,
-                        "end_date": str(stream.get("end_date")) if stream.get("end_date") else None,
+                        "start_date": _date_str(stream.get("start_date")),
+                        "end_date": _date_str(stream.get("end_date")),
                     }
                 )
     return {"income_streams": out}

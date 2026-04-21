@@ -34,6 +34,15 @@ class AccountsScreen(Screen[None]):
         padding: 0 1;
         color: $text-muted;
     }
+    AccountsScreen #accounts-error {
+        padding: 0 1;
+        color: $error;
+        background: $error 15%;
+        display: none;
+    }
+    AccountsScreen #accounts-error.-visible {
+        display: block;
+    }
     AccountsScreen DataTable {
         height: 1fr;
     }
@@ -48,6 +57,7 @@ class AccountsScreen(Screen[None]):
         institution = self._enrollment.institution_name or "(unknown institution)"
         yield Header(show_clock=False)
         yield Static(f"Accounts — {institution}", id="accounts-title")
+        yield Static("", id="accounts-error")
         table: DataTable[str] = DataTable(zebra_stripes=True, cursor_type="row")
         table.id = "accounts-table"
         yield table
@@ -59,13 +69,29 @@ class AccountsScreen(Screen[None]):
     def action_refresh(self) -> None:
         self._refresh()
 
+    def _show_error(self, message: str) -> None:
+        banner = self.query_one("#accounts-error", Static)
+        banner.update(f"⚠ {message}")
+        banner.add_class("-visible")
+
+    def _clear_error(self) -> None:
+        banner = self.query_one("#accounts-error", Static)
+        banner.update("")
+        banner.remove_class("-visible")
+
     def _refresh(self) -> None:
+        self._clear_error()
         table = self.query_one("#accounts-table", DataTable)
         table.clear(columns=True)
         for column in _COLUMNS:
             table.add_column(column, key=column)
 
-        accounts = list(self._provider.list_accounts(self._enrollment))
+        try:
+            accounts = list(self._provider.list_accounts(self._enrollment))
+        except Exception as e:  # noqa: BLE001 - surface upstream error, don't crash
+            self._show_error(f"Could not load accounts: {e}")
+            return
+
         balances_by_id = self._load_balances(accounts)
         institution = self._enrollment.institution_name or "—"
 
@@ -87,6 +113,7 @@ class AccountsScreen(Screen[None]):
             return {}
         try:
             balances = self._provider.get_balances(self._enrollment)
-        except Exception:  # noqa: BLE001  - network errors shouldn't crash the TUI
+        except Exception as e:  # noqa: BLE001 - network can fail; keep table usable
+            self._show_error(f"Balances unavailable: {e}")
             return {}
         return {b.account_id: b for b in balances}

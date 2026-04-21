@@ -18,6 +18,7 @@ Sign convention:
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from plaid.model.accounts_balance_get_request import AccountsBalanceGetRequest
@@ -209,6 +210,16 @@ def _to_balance(acct: dict[str, Any]) -> Balance:
 
 
 def _to_transaction(row: dict[str, Any]) -> Transaction:
+    raw_blob = row.get("raw")
+    parsed_raw: dict[str, Any] = {}
+    if isinstance(raw_blob, str) and raw_blob:
+        try:
+            loaded = json.loads(raw_blob)
+            if isinstance(loaded, dict):
+                parsed_raw = loaded
+        except json.JSONDecodeError:
+            parsed_raw = {}
+
     return Transaction(
         id=row["transaction_id"],
         account_id=row["account_id"],
@@ -222,7 +233,7 @@ def _to_transaction(row: dict[str, Any]) -> Transaction:
         subcategory=row.get("subcategory"),
         pending=bool(row.get("pending")),
         payment_channel=row.get("payment_channel"),
-        raw={},
+        raw=parsed_raw,
     )
 
 

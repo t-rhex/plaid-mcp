@@ -16,9 +16,9 @@ import click
 
 from .config import Config
 from .link import complete_link, create_hosted_link
+from .providers import Enrollment, build_provider
 from .server import build_server
 from .storage import Storage
-from .teller_cli import _build_provider as _build_teller_provider
 from .teller_cli import _read_enrollment as _read_teller_enrollment
 from .teller_cli import teller_group
 
@@ -94,25 +94,58 @@ def list_cmd() -> None:
 main.add_command(teller_group)
 
 
+def _pick_tui_enrollment(cfg: Config, storage: Storage | None) -> Enrollment | None:
+    """Pick which enrollment the TUI should open with.
+
+    Teller: the single saved enrollment file (connect writes one).
+    Plaid: the first linked item in storage — a multi-item picker is a
+    later slice. Returns None when nothing is linked yet; the TUI then
+    renders the empty-state screen with onboarding instructions.
+    """
+    if cfg.provider == "teller":
+        return _read_teller_enrollment()
+    if cfg.provider == "plaid" and storage is not None:
+        items = storage.list_items()
+        if not items:
+            return None
+        first = items[0]
+        access_token = storage.get_access_token(first["item_id"])
+        if not access_token:
+            return None
+        return Enrollment(
+            id=first["item_id"],
+            institution_id=first.get("institution_id"),
+            institution_name=first.get("institution_name"),
+            access_token=access_token,
+            provider="plaid",
+        )
+    return None
+
+
 @main.command("tui")
 def tui_cmd() -> None:
     """Launch the Textual TUI to browse accounts and transactions.
 
-    Uses the saved Teller enrollment (``plaid-mcp teller connect``). If no
-    enrollment exists the TUI opens on an instructional empty screen.
+    Works with whichever provider is selected in ``PROVIDER``. If no
+    enrollment exists for that provider the TUI opens on an instructional
+    empty screen.
     """
     from .tui import PlaidMcpTUI
 
     cfg = Config.from_env()
-    enrollment = _read_teller_enrollment()
+    storage = Storage(cfg.db_path) if cfg.provider == "plaid" else None
+    enrollment = _pick_tui_enrollment(cfg, storage)
 
-    provider = _build_teller_provider(cfg) if enrollment is not None else None
+    provider = build_provider(cfg, storage) if enrollment is not None else None
     try:
         app = PlaidMcpTUI(provider=provider, enrollment=enrollment)
         app.run()
     finally:
-        if provider is not None:
-            provider.close()
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+        if storage is not None:
+            storage.close()
 
 
 if __name__ == "__main__":

@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
-
+from typing import Any
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS items (
@@ -307,7 +307,7 @@ class Storage:
         sql = (
             "SELECT transaction_id, account_id, amount, iso_currency, date, "
             "authorized_date, name, merchant_name, category, subcategory, "
-            "pending, payment_channel "
+            "pending, payment_channel, raw "
             f"FROM transactions {where} "
             "ORDER BY date DESC, transaction_id LIMIT ?"
         )
@@ -381,9 +381,11 @@ class Storage:
                    (account_id, effective_apr, promo_expires, note, updated_at)
                VALUES (?, ?, ?, ?, ?)
                ON CONFLICT(account_id) DO UPDATE SET
-                   effective_apr = COALESCE(excluded.effective_apr, account_overrides.effective_apr),
-                   promo_expires = COALESCE(excluded.promo_expires, account_overrides.promo_expires),
-                   note          = COALESCE(excluded.note,          account_overrides.note),
+                   effective_apr =
+                       COALESCE(excluded.effective_apr, account_overrides.effective_apr),
+                   promo_expires =
+                       COALESCE(excluded.promo_expires, account_overrides.promo_expires),
+                   note          = COALESCE(excluded.note, account_overrides.note),
                    updated_at    = excluded.updated_at""",
             (account_id, effective_apr, promo_expires, note, _utcnow()),
         )
