@@ -62,6 +62,10 @@ class Config:
     x402_receiving_address: str | None = None
     x402_network: str = "base-sepolia"
     x402_facilitator_url: str | None = None
+    # Explicit opt-in required before the gate will accept Base mainnet
+    # (real USDC). Without this, build_gate refuses to construct an
+    # X402Gate bound to a mainnet network — guardrail against typos.
+    x402_allow_mainnet: bool = False
 
     @property
     def host(self) -> str:
@@ -114,6 +118,9 @@ class Config:
         x402_receiving_address = os.getenv("X402_RECEIVING_ADDRESS", "").strip() or None
         x402_network = os.getenv("X402_NETWORK", "base-sepolia").strip().lower() or "base-sepolia"
         x402_facilitator_url = os.getenv("X402_FACILITATOR_URL", "").strip() or None
+        x402_allow_mainnet = os.getenv("X402_ALLOW_MAINNET", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
 
         if paywall == "x402" and not x402_receiving_address:
             raise RuntimeError(
@@ -145,6 +152,7 @@ class Config:
             x402_receiving_address=x402_receiving_address,
             x402_network=x402_network,
             x402_facilitator_url=x402_facilitator_url,
+            x402_allow_mainnet=x402_allow_mainnet,
         )
 
     def as_products(self):  # -> list[plaid.model.products.Products]

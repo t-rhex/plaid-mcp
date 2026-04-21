@@ -2,14 +2,20 @@
 
 No live facilitator, no network. We hand-roll a minimal Starlette app
 that echoes JSON-RPC-shaped responses, wrap it with ``X402Gate``, and
-drive it through Starlette's ``TestClient``. The x402 facilitator isn't
-hit here — the gate just emits 402 when no ``X-PAYMENT`` header is
-attached. On-chain settlement is a follow-up slice.
+drive it through Starlette's ``TestClient``. The facilitator is stubbed
+in-process via ``_FakeFacilitator`` so verify/settle flow can be
+exercised without leaving the test runner.
+
+The one live-facilitator test (sign + pay a real Base Sepolia payment)
+lives under the ``x402_testnet`` marker and is skipped without a funded
+``X402_TESTNET_PRIVATE_KEY`` in env.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import dataclass, field
 
 import pytest
 from starlette.applications import Starlette
@@ -17,6 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from x402.schemas import SettleResponse, VerifyResponse
 
 from plaid_mcp.config import Config
 from plaid_mcp.payments import (
@@ -28,6 +35,54 @@ from plaid_mcp.payments import (
     build_gate,
 )
 from plaid_mcp.payments.base import DEFAULT_TOOL_PRICE_CENTS
+
+# ----------------------------------------------------------------------
+# Test double — stands in for x402's HTTPFacilitatorClient so we can
+# exercise verify + settle without leaving the process.
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class _FakeFacilitator:
+    """In-process facilitator stub honoring the async verify/settle shape."""
+
+    is_valid: bool = True
+    invalid_reason: str | None = None
+    settle_success: bool = True
+    settle_raises: Exception | None = None
+    verify_calls: list = field(default_factory=list)
+    settle_calls: list = field(default_factory=list)
+
+    async def verify(self, payload, requirements):
+        self.verify_calls.append((payload, requirements))
+        return VerifyResponse(
+            is_valid=self.is_valid,
+            invalid_reason=self.invalid_reason,
+            invalid_message=None,
+            payer="0xPAYER",
+        )
+
+    async def settle(self, payload, requirements):
+        self.settle_calls.append((payload, requirements))
+        if self.settle_raises is not None:
+            raise self.settle_raises
+        if self.settle_success:
+            return SettleResponse(
+                success=True,
+                transaction="0xDEADBEEF",
+                network=requirements.network,
+                amount=requirements.amount,
+                payer="0xPAYER",
+            )
+        return SettleResponse(
+            success=False,
+            error_reason="settle_failed",
+            error_message="facilitator says no",
+            transaction="",
+            network=requirements.network,
+            amount=requirements.amount,
+            payer="0xPAYER",
+        )
 
 # ----------------------------------------------------------------------
 # Shared fixtures — a stand-in for FastMCP's Starlette app.
@@ -287,14 +342,12 @@ def test_x402_ignores_non_mcp_paths(fake_mcp_app: Starlette, x402_gate: X402Gate
 
 
 def test_x402_passes_through_well_formed_payment_header(
-    fake_mcp_app: Starlette, x402_gate: X402Gate
+    fake_mcp_app: Starlette,
 ) -> None:
-    """When the client attaches a shape-valid ``X-PAYMENT`` payload we
-    forward to the upstream app. On-chain settlement is a later slice;
-    this test pins the current "header present + parseable → forward"
-    behavior so clients can dev-loop without waiting for facilitator
-    wiring."""
-    # Minimal PaymentPayload — the x402 schema will validate it.
+    """When the client attaches a shape-valid ``X-PAYMENT`` payload AND the
+    facilitator confirms it, we forward to the upstream app. The
+    facilitator is stubbed so this stays offline; the subsequent settle
+    call also succeeds (see the fake)."""
     from x402.schemas import PaymentPayload
 
     payload = PaymentPayload(
@@ -314,7 +367,13 @@ def test_x402_passes_through_well_formed_payment_header(
             "mimeType": "application/json",
         },
     )
-    client = TestClient(x402_gate.asgi_middleware(fake_mcp_app))
+    gate = X402Gate(
+        receiving_address="0x0000000000000000000000000000000000000001",
+        network="base-sepolia",
+        prices=DEFAULT_PRICES,
+        facilitator=_FakeFacilitator(is_valid=True, settle_success=True),
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
     rpc = {
         "jsonrpc": "2.0",
         "id": 9,
@@ -327,6 +386,8 @@ def test_x402_passes_through_well_formed_payment_header(
         headers={"X-PAYMENT": payload.model_dump_json(by_alias=True)},
     )
     assert response.status_code == 200
+    # Settlement succeeded → X-Payment-Response header is present.
+    assert "x-payment-response" in {k.lower() for k in response.headers.keys()}
 
 
 def test_x402_rejects_malformed_payment_header(
@@ -341,7 +402,9 @@ def test_x402_rejects_malformed_payment_header(
     }
     response = client.post("/mcp", json=rpc, headers={"X-PAYMENT": "not-json"})
     assert response.status_code == 402
-    assert response.json()["error"].startswith("Invalid payment payload")
+    # Machine-readable error field per the x402 spec — clients dispatch
+    # on this string rather than parsing prose.
+    assert response.json()["error"] == "invalid_payment_header"
 
 
 def test_x402_body_is_replayed_to_downstream(
@@ -425,3 +488,363 @@ def test_x402_batch_with_tool_call_gates_entire_batch(
         headers={"content-type": "application/json"},
     )
     assert response.status_code == 402
+
+
+# ----------------------------------------------------------------------
+# Facilitator verify + settle (offline, with _FakeFacilitator)
+# ----------------------------------------------------------------------
+
+
+def _shape_valid_payload_json() -> str:
+    """Build a schema-valid PaymentPayload that the facilitator stub will
+    judge — the signature bytes are fake but the shape parses."""
+    from x402.schemas import PaymentPayload
+
+    return PaymentPayload(
+        x402_version=2,
+        payload={"signature": "0xabc", "authorization": {}},
+        accepted={
+            "scheme": "exact",
+            "network": "base-sepolia",
+            "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            "amount": "500000",
+            "payTo": "0x0000000000000000000000000000000000000001",
+            "maxTimeoutSeconds": 60,
+        },
+        resource={
+            "url": "mcp://tool/summarize_debt_tool",
+            "description": "Tool: summarize_debt_tool",
+            "mimeType": "application/json",
+        },
+    ).model_dump_json(by_alias=True)
+
+
+def test_x402_spoofed_payment_is_rejected_by_facilitator(
+    fake_mcp_app: Starlette,
+) -> None:
+    """A schema-valid X-PAYMENT that the facilitator flags invalid →
+    402 with ``error`` field populated from VerifyResponse.invalid_reason."""
+    fake = _FakeFacilitator(is_valid=False, invalid_reason="insufficient_funds")
+    gate = X402Gate(
+        receiving_address="0x0000000000000000000000000000000000000001",
+        network="base-sepolia",
+        prices=DEFAULT_PRICES,
+        facilitator=fake,
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool", "arguments": {}},
+    }
+    response = client.post(
+        "/mcp", json=rpc, headers={"X-PAYMENT": _shape_valid_payload_json()}
+    )
+    assert response.status_code == 402
+    body = response.json()
+    assert body["error"] == "insufficient_funds"
+    # Verify was called; settle was NOT (we don't settle a failed verify).
+    assert len(fake.verify_calls) == 1
+    assert fake.settle_calls == []
+
+
+def test_x402_no_header_has_no_error_field_in_402(
+    fake_mcp_app: Starlette,
+) -> None:
+    """The initial 402 quote (no X-PAYMENT header yet) is generic per the
+    spec — clients shouldn't see a specific ``error`` reason because no
+    payment has been attempted."""
+    fake = _FakeFacilitator(is_valid=True)
+    gate = X402Gate(
+        receiving_address="0x0000000000000000000000000000000000000001",
+        network="base-sepolia",
+        prices=DEFAULT_PRICES,
+        facilitator=fake,
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "get_balances_tool"},
+    }
+    response = client.post("/mcp", json=rpc)
+    assert response.status_code == 402
+    # Generic string; no machine-readable error slug because nothing
+    # was actually *verified* as failing.
+    body = response.json()
+    assert body["error"] == "Payment Required"
+    # Facilitator was never called.
+    assert fake.verify_calls == []
+
+
+def test_x402_non_mcp_path_bypasses_gate_entirely(
+    x402_gate: X402Gate,
+) -> None:
+    """Only /mcp is gated. Tool-call JSON on some other path must pass
+    through untouched, even if the JSON body looks like a tools/call."""
+    async def echo(request: Request) -> JSONResponse:
+        body = await request.json()
+        return JSONResponse({"saw": body.get("method")})
+
+    app = Starlette(routes=[Route("/other", echo, methods=["POST"])])
+    client = TestClient(x402_gate.asgi_middleware(app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool"},
+    }
+    response = client.post("/other", json=rpc)
+    assert response.status_code == 200
+    assert response.json()["saw"] == "tools/call"
+
+
+def test_x402_settle_failure_does_not_block_upstream_response(
+    fake_mcp_app: Starlette, caplog,
+) -> None:
+    """If verify succeeds but settle raises, the tool response still
+    reaches the client — the user already got what they paid for.
+    Failure is logged for operator visibility."""
+    fake = _FakeFacilitator(
+        is_valid=True,
+        settle_raises=RuntimeError("facilitator down"),
+    )
+    gate = X402Gate(
+        receiving_address="0x0000000000000000000000000000000000000001",
+        network="base-sepolia",
+        prices=DEFAULT_PRICES,
+        facilitator=fake,
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool", "arguments": {}},
+    }
+    import logging as _logging
+    with caplog.at_level(_logging.ERROR, logger="plaid_mcp.payments.x402"):
+        response = client.post(
+            "/mcp",
+            json=rpc,
+            headers={"X-PAYMENT": _shape_valid_payload_json()},
+        )
+    # Upstream tool ran and returned 200.
+    assert response.status_code == 200
+    assert response.json()["result"] == "ok"
+    # Settle was attempted.
+    assert len(fake.settle_calls) == 1
+    # And a structured error was logged.
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any("x402 settle raised" in r.message for r in error_records), (
+        f"Expected an x402 settle-raised log; saw: {[r.message for r in error_records]}"
+    )
+
+
+def test_x402_settle_reported_failure_does_not_block(
+    fake_mcp_app: Starlette, caplog,
+) -> None:
+    """Same as above but the facilitator returned success=False instead of
+    raising. Still must not 5xx — upstream response flows out."""
+    fake = _FakeFacilitator(is_valid=True, settle_success=False)
+    gate = X402Gate(
+        receiving_address="0x0000000000000000000000000000000000000001",
+        network="base-sepolia",
+        prices=DEFAULT_PRICES,
+        facilitator=fake,
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool", "arguments": {}},
+    }
+    import logging as _logging
+    with caplog.at_level(_logging.ERROR, logger="plaid_mcp.payments.x402"):
+        response = client.post(
+            "/mcp",
+            json=rpc,
+            headers={"X-PAYMENT": _shape_valid_payload_json()},
+        )
+    assert response.status_code == 200
+    assert any(
+        "x402 settle reported failure" in r.message for r in caplog.records
+    )
+
+
+def test_x402_successful_verify_and_settle_emits_payment_response_header(
+    fake_mcp_app: Starlette,
+) -> None:
+    """Happy path end-to-end: verify OK → forward → settle OK → header
+    attached to the outgoing 200."""
+    fake = _FakeFacilitator(is_valid=True, settle_success=True)
+    gate = X402Gate(
+        receiving_address="0x0000000000000000000000000000000000000001",
+        network="base-sepolia",
+        prices=DEFAULT_PRICES,
+        facilitator=fake,
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool", "arguments": {}},
+    }
+    response = client.post(
+        "/mcp", json=rpc, headers={"X-PAYMENT": _shape_valid_payload_json()}
+    )
+    assert response.status_code == 200
+    header_names = {k.lower() for k in response.headers.keys()}
+    assert "x-payment-response" in header_names
+
+
+# ----------------------------------------------------------------------
+# build_gate — network/facilitator consistency + mainnet opt-in
+# ----------------------------------------------------------------------
+
+
+def test_build_gate_refuses_mainnet_without_explicit_opt_in() -> None:
+    with pytest.raises(RuntimeError, match="X402_ALLOW_MAINNET"):
+        build_gate(
+            _base_config(
+                paywall="x402",
+                x402_receiving_address="0xabc0000000000000000000000000000000000001",
+                x402_network="base",
+                x402_allow_mainnet=False,
+            )
+        )
+
+
+def test_build_gate_allows_mainnet_with_opt_in() -> None:
+    gate = build_gate(
+        _base_config(
+            paywall="x402",
+            x402_receiving_address="0xabc0000000000000000000000000000000000001",
+            x402_network="base",
+            x402_allow_mainnet=True,
+        )
+    )
+    assert isinstance(gate, X402Gate)
+    assert gate.network == "base"
+
+
+def test_build_gate_refuses_mismatched_testnet_facilitator_for_mainnet() -> None:
+    with pytest.raises(RuntimeError, match="testnet"):
+        build_gate(
+            _base_config(
+                paywall="x402",
+                x402_receiving_address="0xabc0000000000000000000000000000000000001",
+                x402_network="base",
+                x402_allow_mainnet=True,
+                x402_facilitator_url="https://facilitator-sepolia.example.org",
+            )
+        )
+
+
+def test_build_gate_refuses_mismatched_mainnet_facilitator_for_testnet() -> None:
+    with pytest.raises(RuntimeError, match="mainnet"):
+        build_gate(
+            _base_config(
+                paywall="x402",
+                x402_receiving_address="0xabc0000000000000000000000000000000000001",
+                x402_network="base-sepolia",
+                x402_facilitator_url="https://facilitator-mainnet.example.org",
+            )
+        )
+
+
+def test_build_gate_defaults_facilitator_url_to_x402_hosted() -> None:
+    from x402.http import DEFAULT_FACILITATOR_URL
+
+    gate = build_gate(
+        _base_config(
+            paywall="x402",
+            x402_receiving_address="0xabc0000000000000000000000000000000000001",
+            x402_network="base-sepolia",
+        )
+    )
+    assert isinstance(gate, X402Gate)
+    assert gate.facilitator_url == DEFAULT_FACILITATOR_URL
+
+
+def test_build_gate_respects_facilitator_url_override() -> None:
+    gate = build_gate(
+        _base_config(
+            paywall="x402",
+            x402_receiving_address="0xabc0000000000000000000000000000000000001",
+            x402_network="base-sepolia",
+            x402_facilitator_url="https://facilitator.example.org/x402",
+        )
+    )
+    assert gate.facilitator_url == "https://facilitator.example.org/x402"
+
+
+# ----------------------------------------------------------------------
+# Online-optional: live Base Sepolia facilitator (skipped without key)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.x402_testnet
+def test_x402_live_base_sepolia_payment_round_trip(fake_mcp_app: Starlette) -> None:
+    """End-to-end against a hosted facilitator on Base Sepolia.
+
+    Requires a wallet key in X402_TESTNET_PRIVATE_KEY that already has a
+    tiny amount of Base Sepolia USDC (the user funds it out of band — this
+    test does NOT auto-fund). Skipped otherwise.
+    """
+    private_key = os.getenv("X402_TESTNET_PRIVATE_KEY", "").strip()
+    if not private_key:
+        pytest.skip(
+            "X402_TESTNET_PRIVATE_KEY not set — skipping live Base Sepolia test."
+        )
+
+    # x402[evm] primitives — only imported inside the test so the offline
+    # test run doesn't pull web3 unnecessarily if someone strips the extra.
+    from eth_account import Account
+    from x402 import x402Client
+    from x402.mechanisms.evm.exact import ExactEvmClientScheme
+    from x402.mechanisms.evm.signers import LocalAccountEvmSigner
+    from x402.schemas import PaymentRequired
+
+    signer = LocalAccountEvmSigner(Account.from_key(private_key))
+    receiver = os.getenv(
+        "X402_TESTNET_RECEIVING_ADDRESS", signer.address
+    )
+
+    # Construct a real gate pointing at the default (hosted) facilitator;
+    # one cent costs 10_000 atomic USDC so the test barely moves funds.
+    gate = X402Gate(
+        receiving_address=receiver,
+        network="base-sepolia",
+        prices=PriceTable(prices={}, default_cents=1),
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "live_test_tool", "arguments": {}},
+    }
+    # Step 1: hit the gate unpaid → 402 with requirements.
+    probe = client.post("/mcp", json=rpc)
+    assert probe.status_code == 402
+    required = PaymentRequired.model_validate(probe.json())
+
+    # Step 2: sign a PaymentPayload with x402Client.
+    x402_client = x402Client()
+    x402_client.register("eip155:84532", ExactEvmClientScheme(signer=signer))
+    import asyncio
+    payload = asyncio.run(x402_client.create_payment_payload(required))
+
+    # Step 3: replay with the signed header → expect 200 + response header.
+    paid = client.post(
+        "/mcp",
+        json=rpc,
+        headers={"X-PAYMENT": payload.model_dump_json(by_alias=True)},
+    )
+    assert paid.status_code == 200, paid.text
+    assert "x-payment-response" in {k.lower() for k in paid.headers.keys()}

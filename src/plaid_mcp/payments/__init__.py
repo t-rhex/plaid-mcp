@@ -39,6 +39,17 @@ def build_gate(config: Config) -> PaymentGate:
         # Config.from_env() already validates that the receiving address is
         # set when paywall="x402", so asserting here is just belt + braces.
         assert config.x402_receiving_address, "X402_RECEIVING_ADDRESS required"
+
+        # Mainnet guard — refuse to bind the gate to real USDC unless the
+        # operator explicitly opted in. Typos in config shouldn't silently
+        # flip us from Sepolia (play money) to Base (real money).
+        if config.x402_network in {"base"} and not config.x402_allow_mainnet:
+            raise RuntimeError(
+                f"X402_NETWORK={config.x402_network!r} is a mainnet network but "
+                "X402_ALLOW_MAINNET is not set. Set X402_ALLOW_MAINNET=1 to "
+                "confirm you want to accept real USDC on Base."
+            )
+
         return X402Gate(
             receiving_address=config.x402_receiving_address,
             network=config.x402_network,

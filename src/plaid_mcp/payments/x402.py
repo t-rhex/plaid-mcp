@@ -1,4 +1,4 @@
-"""x402 payment gate — custom ASGI middleware.
+"""x402 payment gate — custom ASGI middleware with real facilitator verify + settle.
 
 Why a custom middleware instead of the ``x402[fastapi]`` middleware:
 FastMCP runs on Starlette directly (no FastAPI), and MCP traffic is
@@ -8,26 +8,60 @@ being invoked and what the tool name is (for per-tool pricing). The
 off-the-shelf FastAPI middleware only scopes by URL path.
 
 The middleware delegates actual payment verification to the x402
-facilitator primitives (``x402Facilitator``) and reuses the x402 schemas
-(``PaymentRequirements``, ``PaymentRequired``, ``PaymentPayload``) so
-the 402 body shape is exactly what x402 clients expect.
+HTTP facilitator (``HTTPFacilitatorClient`` hitting a hosted
+facilitator URL — ``https://x402.org/facilitator`` by default) and
+reuses the x402 schemas (``PaymentRequirements``, ``PaymentRequired``,
+``PaymentPayload``) so the 402 body shape is exactly what x402 clients
+expect.
+
+We use the *remote* HTTP facilitator (``x402.http.HTTPFacilitatorClient``)
+rather than a local ``x402Facilitator`` with schemes registered in-
+process. That means the EVM exact scheme mechanics (EIP-3009 signature
+recovery, USDC settlement) live at the hosted facilitator — we only
+forward the signed payload. The ``x402.mechanisms.evm.exact``
+``ExactEvmFacilitatorScheme`` is what the *remote* service registers;
+our role is to format the verify/settle HTTP calls correctly, which
+``HTTPFacilitatorClient`` handles.
+
+Verify/settle lifecycle per request::
+
+    1. Peek body → decide if this is a paid tools/call
+    2. No X-PAYMENT header     → 402, no `error` (standard initial quote)
+    3. Malformed X-PAYMENT     → 402, error="invalid_payment_header"
+    4. Facilitator.verify fails → 402, error=<facilitator invalid_reason>
+    5. verify OK → forward request, capture upstream response,
+       then facilitator.settle(); attach X-Payment-Response header.
+       Settle failures are LOGGED but do NOT block the upstream
+       response — the user already got what they paid for; settle
+       failure is our operational problem, not theirs.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
+from x402.http import (
+    DEFAULT_FACILITATOR_URL,
+    FacilitatorConfig,
+    HTTPFacilitatorClient,
+    encode_payment_response_header,
+)
 from x402.schemas import (
     X402_VERSION,
     PaymentPayload,
     PaymentRequired,
     PaymentRequirements,
     ResourceInfo,
+    SettleResponse,
+    VerifyResponse,
 )
 
 from .base import PriceTable
+
+logger = logging.getLogger(__name__)
 
 # USDC contract addresses on Base and Base Sepolia. These are the only
 # networks x402 officially supports at time of writing; we gate on the
@@ -38,6 +72,10 @@ _USDC_ASSETS = {
     "base": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
 }
 
+# Networks considered "mainnet" — require explicit opt-in so a typo in
+# config can't silently start accepting real USDC.
+_MAINNET_NETWORKS = {"base"}
+
 # 6 decimals for USDC → 1 cent = 10,000 atomic units.
 _ATOMIC_PER_CENT = 10_000
 
@@ -45,6 +83,9 @@ _ATOMIC_PER_CENT = 10_000
 # x402 v2 also accepts ``Payment-Signature`` but ``X-PAYMENT`` is the
 # legacy-compatible name most clients send.
 _PAYMENT_HEADER = b"x-payment"
+
+# Response header carrying the base64-encoded SettleResponse per x402 spec.
+_PAYMENT_RESPONSE_HEADER = b"x-payment-response"
 
 # MCP's standard HTTP path. FastMCP's ``http_app()`` mounts the
 # StreamableHTTP app at ``/mcp`` by default; if an operator reroutes
@@ -57,6 +98,32 @@ DEFAULT_MCP_PATH = "/mcp"
 # surface.
 _MAX_PEEK_BYTES = 1 * 1024 * 1024
 
+# Machine-readable error strings set on the 402 `error` field. These
+# map one-to-one with the VerifyResponse.invalid_reason values the
+# facilitator returns, plus two local ones the gate sets itself.
+ERR_INVALID_PAYMENT_HEADER = "invalid_payment_header"
+ERR_VERIFY_FAILED = "invalid_payment"
+
+
+class FacilitatorLike(Protocol):
+    """Subset of the x402 FacilitatorClient protocol we use.
+
+    Declared locally so tests can supply a fake without importing
+    the full HTTPFacilitatorClient surface (e.g. a dataclass stub).
+    """
+
+    async def verify(
+        self,
+        payload: PaymentPayload,
+        requirements: PaymentRequirements,
+    ) -> VerifyResponse: ...
+
+    async def settle(
+        self,
+        payload: PaymentPayload,
+        requirements: PaymentRequirements,
+    ) -> SettleResponse: ...
+
 
 @dataclass(frozen=True)
 class _PaymentDecision:
@@ -65,6 +132,32 @@ class _PaymentDecision:
     gate: bool          # True → must pay; False → free (discovery or not a tool call)
     tool_name: str | None
     rpc_id: Any         # echo back in 402 response
+
+
+def _validate_network_facilitator(network: str, facilitator_url: str | None) -> None:
+    """Fail fast if a mainnet facilitator URL is paired with testnet network
+    (or the reverse). Heuristic — we can't know every facilitator's chain
+    set, but we can catch the obvious typos.
+    """
+    if not facilitator_url:
+        return
+    url = facilitator_url.lower()
+    url_is_testnet = ("sepolia" in url) or ("testnet" in url)
+    url_is_mainnet = "mainnet" in url
+    net_is_mainnet = network in _MAINNET_NETWORKS
+
+    if url_is_testnet and net_is_mainnet:
+        raise RuntimeError(
+            f"X402 facilitator URL {facilitator_url!r} looks like a testnet "
+            f"facilitator but X402_NETWORK={network!r} is mainnet. Refusing "
+            "to start with mismatched network/facilitator."
+        )
+    if url_is_mainnet and not net_is_mainnet:
+        raise RuntimeError(
+            f"X402 facilitator URL {facilitator_url!r} looks like a mainnet "
+            f"facilitator but X402_NETWORK={network!r} is testnet. Refusing "
+            "to start with mismatched network/facilitator."
+        )
 
 
 class X402Gate:
@@ -86,18 +179,30 @@ class X402Gate:
         facilitator_url: str | None = None,
         prices: PriceTable,
         mcp_path: str = DEFAULT_MCP_PATH,
+        facilitator: FacilitatorLike | None = None,
     ) -> None:
         if network not in _USDC_ASSETS:
             raise ValueError(
                 f"X402Gate: unsupported network {network!r}; "
                 f"expected one of {sorted(_USDC_ASSETS)}."
             )
+
+        _validate_network_facilitator(network, facilitator_url)
+
         self.receiving_address = receiving_address
         self.network = network
-        self.facilitator_url = facilitator_url  # None → use x402 default
+        # Resolve the effective URL up front so the tests + the smoke
+        # log line can see which facilitator we're about to hit.
+        self.facilitator_url = facilitator_url or DEFAULT_FACILITATOR_URL
         self.prices = prices
         self.mcp_path = mcp_path
         self._asset = _USDC_ASSETS[network]
+
+        # Allow tests to inject a stub via ``facilitator=``; the real
+        # HTTPFacilitatorClient performs actual HTTP to the facilitator.
+        self._facilitator: FacilitatorLike = facilitator or HTTPFacilitatorClient(
+            FacilitatorConfig(url=self.facilitator_url)
+        )
 
     # ------------------------------------------------------------------
     # ASGI entrypoint
@@ -124,33 +229,133 @@ class X402Gate:
                 await app(scope, receive_replay, send)
                 return
 
-            # Tool call. Require a payment header; for v1 the gate just
-            # checks presence — treating the body as an opaque signed
-            # payload. Future: call the x402 facilitator verifier.
             headers = dict(scope.get("headers") or [])
             payment_header = headers.get(_PAYMENT_HEADER)
 
+            # No header → standard initial 402 quote (no `error` field).
             if not payment_header:
-                await self._send_402(send, decision)
+                await self._send_402(send, decision, error=None)
                 return
 
-            # A payment header is present. Validate the shape with the
-            # x402 schema so malformed payloads get a clean 402 instead
-            # of an internal crash. We don't hit the live facilitator
-            # here because that requires scheme mechanisms to be
-            # registered for the configured network — a separate slice.
+            # Header present but not parseable per the x402 schema.
             try:
-                PaymentPayload.model_validate_json(payment_header)
+                payment_payload = PaymentPayload.model_validate_json(payment_header)
             except Exception:  # noqa: BLE001 — any parse error = payment invalid
-                await self._send_402(send, decision, error="Invalid payment payload")
+                await self._send_402(send, decision, error=ERR_INVALID_PAYMENT_HEADER)
                 return
 
-            # Payment looks well-formed; forward the request. Real
-            # settlement (on-chain) is a follow-up once we have a
-            # facilitator configured with schemes.
-            await app(scope, receive_replay, send)
+            # Build the requirements this caller *should* have paid
+            # against, and verify the signed payload with the facilitator.
+            requirements = self._payment_requirements(decision.tool_name or "unknown")
+
+            try:
+                verify_response = await self._facilitator.verify(
+                    payment_payload, requirements
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Facilitator unreachable / bad response. Treat as a
+                # verification failure so the client gets a clean 402
+                # and can retry; don't expose internals via 5xx.
+                logger.warning("x402 facilitator verify errored: %s", exc)
+                await self._send_402(send, decision, error=ERR_VERIFY_FAILED)
+                return
+
+            if not verify_response.is_valid:
+                reason = verify_response.invalid_reason or ERR_VERIFY_FAILED
+                await self._send_402(send, decision, error=reason)
+                return
+
+            # Verify OK → forward the request, buffering the upstream
+            # response so we can settle *after* FastMCP returns and
+            # attach the X-Payment-Response header.
+            await self._forward_and_settle(
+                app, scope, receive_replay, send,
+                payment_payload, requirements,
+            )
 
         return _wrapped
+
+    # ------------------------------------------------------------------
+    # Settlement
+    # ------------------------------------------------------------------
+
+    async def _forward_and_settle(
+        self,
+        app,
+        scope: dict,
+        receive,
+        send,
+        payload: PaymentPayload,
+        requirements: PaymentRequirements,
+    ) -> None:
+        """Run the wrapped app, then call facilitator.settle() once it
+        returns ``http.response.start``. Attaches the settle response as
+        ``X-Payment-Response``.
+
+        Settle failures do NOT block the response — the user's tool call
+        already ran. We just log the failure.
+        """
+        start_msg: dict | None = None
+        forwarded_start = False
+
+        # Run settle concurrently: the moment we see the upstream start
+        # message we kick off settle, then we inject the response
+        # header into the start message before sending it downstream.
+        async def _send(message: dict) -> None:
+            nonlocal start_msg, forwarded_start
+            if message["type"] == "http.response.start" and not forwarded_start:
+                start_msg = dict(message)
+                # Attach settle response header (or an error marker).
+                settle_header = await self._run_settle(payload, requirements)
+                if settle_header is not None:
+                    headers = list(start_msg.get("headers") or [])
+                    headers.append((_PAYMENT_RESPONSE_HEADER, settle_header))
+                    start_msg["headers"] = headers
+                forwarded_start = True
+                await send(start_msg)
+            else:
+                await send(message)
+
+        await app(scope, receive, _send)
+
+    async def _run_settle(
+        self,
+        payload: PaymentPayload,
+        requirements: PaymentRequirements,
+    ) -> bytes | None:
+        """Call facilitator.settle(), returning the base64 header bytes or
+        None if settlement failed/errored. We never raise from here — the
+        caller must return the upstream response regardless.
+        """
+        try:
+            settle_response = await self._facilitator.settle(payload, requirements)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "x402 settle raised for pay_to=%s amount=%s: %s",
+                requirements.pay_to, requirements.amount, exc,
+                exc_info=True,
+            )
+            return None
+
+        if not settle_response.success:
+            logger.error(
+                "x402 settle reported failure pay_to=%s amount=%s reason=%s message=%s",
+                requirements.pay_to, requirements.amount,
+                settle_response.error_reason, settle_response.error_message,
+            )
+            # Still propagate the structured response so clients can see
+            # why — they already have their tool output, but knowing the
+            # operator failed to settle may matter for retries.
+            try:
+                return encode_payment_response_header(settle_response).encode("ascii")
+            except Exception:  # noqa: BLE001
+                return None
+
+        try:
+            return encode_payment_response_header(settle_response).encode("ascii")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("x402 encode settle header failed: %s", exc)
+            return None
 
     # ------------------------------------------------------------------
     # 402 response
@@ -169,7 +374,11 @@ class X402Gate:
             extra={"tool": tool_name, "priceCents": cents},
         )
 
-    def _build_402_body(self, decision: _PaymentDecision, error: str) -> bytes:
+    def _build_402_body(
+        self,
+        decision: _PaymentDecision,
+        error: str | None,
+    ) -> bytes:
         tool = decision.tool_name or "unknown"
         requirements = self._payment_requirements(tool)
         resource = ResourceInfo(
@@ -177,9 +386,12 @@ class X402Gate:
             description=f"MCP tool: {tool}",
             mime_type="application/json",
         )
+        # The x402 PaymentRequired schema marks ``error`` as required;
+        # on the initial quote (no header sent yet) we emit the spec-
+        # standard generic string so clients know "pay and retry".
         body = PaymentRequired(
             x402_version=X402_VERSION,
-            error=error,
+            error=error or "Payment Required",
             resource=resource,
             accepts=[requirements],
         )
@@ -190,7 +402,7 @@ class X402Gate:
         send,
         decision: _PaymentDecision,
         *,
-        error: str = "Payment Required",
+        error: str | None,
     ) -> None:
         body = self._build_402_body(decision, error)
         await send(
@@ -296,3 +508,5 @@ def _tool_name_from(rpc_payload: dict) -> str | None:
         if isinstance(name, str):
             return name
     return None
+
+
