@@ -67,6 +67,15 @@ class Config:
     # X402Gate bound to a mainnet network — guardrail against typos.
     x402_allow_mainnet: bool = False
 
+    # MPP (Machine Payments Protocol via Tempo stablecoin). Same shape
+    # as the x402 block above: destination address + network, with a
+    # hard mainnet opt-in so a typo can't silently send real USDC.
+    mpp_destination_address: str | None = None
+    mpp_network: str = "tempo-testnet"
+    mpp_allow_mainnet: bool = False
+    mpp_secret_key: str | None = None
+    mpp_rpc_url: str | None = None
+
     @property
     def host(self) -> str:
         try:
@@ -122,14 +131,40 @@ class Config:
             "1", "true", "yes", "on",
         }
 
+        mpp_destination_address = os.getenv("MPP_DESTINATION_ADDRESS", "").strip() or None
+        mpp_network = (
+            os.getenv("MPP_NETWORK", "tempo-testnet").strip().lower() or "tempo-testnet"
+        )
+        mpp_allow_mainnet = os.getenv("MPP_ALLOW_MAINNET", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        mpp_secret_key = os.getenv("MPP_SECRET_KEY", "").strip() or None
+        mpp_rpc_url = os.getenv("MPP_RPC_URL", "").strip() or None
+
         if paywall == "x402" and not x402_receiving_address:
             raise RuntimeError(
                 "PAYWALL=x402 requires X402_RECEIVING_ADDRESS to be set to the "
                 "Base wallet address that should receive USDC payments."
             )
-        if paywall not in {"none", "x402"}:
+        if paywall == "mpp" and not mpp_destination_address:
             raise RuntimeError(
-                f"PAYWALL must be 'none' or 'x402' (got {paywall!r})."
+                "PAYWALL=mpp requires MPP_DESTINATION_ADDRESS to be set to the "
+                "Tempo wallet address that should receive USDC payments."
+            )
+        # Defer the "what counts as mainnet" decision to the gate module
+        # so both places agree on the alias table.
+        if paywall == "mpp":
+            from .payments.mpp import is_mainnet as _mpp_is_mainnet
+
+            if _mpp_is_mainnet(mpp_network) and not mpp_allow_mainnet:
+                raise RuntimeError(
+                    f"MPP_NETWORK={mpp_network!r} resolves to a mainnet chain "
+                    "but MPP_ALLOW_MAINNET is not set. Set MPP_ALLOW_MAINNET=1 "
+                    "to confirm you want to accept real USDC on Tempo."
+                )
+        if paywall not in {"none", "x402", "mpp"}:
+            raise RuntimeError(
+                f"PAYWALL must be 'none', 'x402', or 'mpp' (got {paywall!r})."
             )
 
         return cls(
@@ -153,6 +188,11 @@ class Config:
             x402_network=x402_network,
             x402_facilitator_url=x402_facilitator_url,
             x402_allow_mainnet=x402_allow_mainnet,
+            mpp_destination_address=mpp_destination_address,
+            mpp_network=mpp_network,
+            mpp_allow_mainnet=mpp_allow_mainnet,
+            mpp_secret_key=mpp_secret_key,
+            mpp_rpc_url=mpp_rpc_url,
         )
 
     def as_products(self):  # -> list[plaid.model.products.Products]

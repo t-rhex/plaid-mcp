@@ -11,12 +11,15 @@ from __future__ import annotations
 
 from ..config import Config
 from .base import PaymentGate, PriceTable
+from .mpp import MppGate
+from .mpp import is_mainnet as _mpp_is_mainnet
 from .noop import NoopGate
 from .prices import DEFAULT_PRICES
 from .x402 import X402Gate
 
 __all__ = [
     "DEFAULT_PRICES",
+    "MppGate",
     "NoopGate",
     "PaymentGate",
     "PriceTable",
@@ -30,7 +33,10 @@ def build_gate(config: Config) -> PaymentGate:
 
     - ``PAYWALL=none`` (or unset) → :class:`NoopGate` (stdio-class; no 402s).
     - ``PAYWALL=x402``            → :class:`X402Gate` wrapping the ASGI app
-      with an HTTP 402 micropayment challenge per tool call.
+      with an HTTP 402 micropayment challenge per tool call on Base.
+    - ``PAYWALL=mpp``             → :class:`MppGate` wrapping the ASGI app
+      with an HTTP 402 + ``WWW-Authenticate: Payment`` challenge per
+      tool call on Tempo.
     """
     mode = (config.paywall or "none").strip().lower()
     if mode == "none":
@@ -56,6 +62,32 @@ def build_gate(config: Config) -> PaymentGate:
             facilitator_url=config.x402_facilitator_url,
             prices=DEFAULT_PRICES,
         )
+    if mode == "mpp":
+        # Same belt-and-braces assertion as x402 above — Config.from_env
+        # already enforces this, but direct Config(...) construction in
+        # tests can skip it.
+        if not config.mpp_destination_address:
+            raise RuntimeError(
+                "PAYWALL=mpp requires mpp_destination_address to be set (Tempo "
+                "wallet that receives USDC payments)."
+            )
+
+        # Mainnet opt-in guard — mirrors the x402 policy exactly.
+        if _mpp_is_mainnet(config.mpp_network) and not config.mpp_allow_mainnet:
+            raise RuntimeError(
+                f"MPP_NETWORK={config.mpp_network!r} resolves to a mainnet "
+                "chain but MPP_ALLOW_MAINNET is not set. Set "
+                "MPP_ALLOW_MAINNET=1 to confirm you want to accept real USDC "
+                "on Tempo."
+            )
+
+        return MppGate(
+            destination_address=config.mpp_destination_address,
+            network=config.mpp_network,
+            secret_key=config.mpp_secret_key,
+            rpc_url=config.mpp_rpc_url,
+            prices=DEFAULT_PRICES,
+        )
     raise ValueError(
-        f"Unknown PAYWALL mode {mode!r}; expected 'none' or 'x402'."
+        f"Unknown PAYWALL mode {mode!r}; expected 'none', 'x402', or 'mpp'."
     )

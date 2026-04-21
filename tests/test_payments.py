@@ -28,6 +28,7 @@ from x402.schemas import SettleResponse, VerifyResponse
 from plaid_mcp.config import Config
 from plaid_mcp.payments import (
     DEFAULT_PRICES,
+    MppGate,
     NoopGate,
     PaymentGate,
     PriceTable,
@@ -35,6 +36,8 @@ from plaid_mcp.payments import (
     build_gate,
 )
 from plaid_mcp.payments.base import DEFAULT_TOOL_PRICE_CENTS
+from plaid_mcp.payments.mpp import _cents_to_amount
+from plaid_mcp.payments.mpp import is_mainnet as _mpp_is_mainnet
 
 # ----------------------------------------------------------------------
 # Test double — stands in for x402's HTTPFacilitatorClient so we can
@@ -939,3 +942,524 @@ def test_x402_live_base_mainnet_payment_round_trip(fake_mcp_app: Starlette) -> N
     )
     assert paid.status_code == 200, paid.text
     assert "x-payment-response" in {k.lower() for k in paid.headers.keys()}
+
+
+# ======================================================================
+# MPP (Machine Payments Protocol via Tempo) — parallel rail to x402.
+#
+# Tests below exercise MppGate using stubbed-out pympp handlers so the
+# offline suite never touches the Tempo network. The one live-facilitator
+# test lives under the ``mpp_testnet`` marker at the bottom and is
+# skipped without MPP_TESTNET_PRIVATE_KEY.
+# ======================================================================
+
+
+@dataclass
+class _FakeChallenge:
+    """Minimal stand-in for ``mpp.Challenge`` for middleware tests.
+
+    MppGate duck-types against ``to_www_authenticate`` and a few
+    attributes (see ``_is_challenge``) — we don't need the real
+    HMAC-bound Challenge to exercise the 402 code path.
+    """
+
+    id: str = "ch_fake"
+    realm: str = "plaid-mcp"
+    method: str = "tempo"
+    intent: str = "charge"
+    www_auth: str = 'Payment realm="plaid-mcp", method="tempo"'
+
+    def to_www_authenticate(self, realm: str) -> str:  # noqa: ARG002 — realm echoed in.
+        return self.www_auth
+
+
+@dataclass
+class _FakeReceipt:
+    """Minimal stand-in for ``mpp.Receipt``."""
+
+    header: str = "receipt-b64"
+
+    def to_payment_receipt(self) -> str:
+        return self.header
+
+
+@dataclass
+class _FakeMppHandler:
+    """Stub pympp Mpp handler. Returns whatever ``result`` is set to.
+
+    ``result`` can be either a ``_FakeChallenge`` (simulating an unpaid
+    or invalid request) or a ``(credential, receipt)`` tuple (simulating
+    a valid payment). Tests toggle this to exercise both branches.
+    """
+
+    result: object = field(default_factory=_FakeChallenge)
+    charge_calls: list = field(default_factory=list)
+
+    async def charge(self, *, authorization, amount, extra=None, **kwargs):
+        self.charge_calls.append(
+            {"authorization": authorization, "amount": amount, "extra": extra, **kwargs}
+        )
+        return self.result
+
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+
+def test_mpp_cents_to_amount_formats_as_two_decimals() -> None:
+    """pympp's charge() expects a human amount string; the gate builds
+    one by quantizing integer cents. Zero-pad the cents half so "5" →
+    "0.05", not "0.5" (which would be 50 cents)."""
+    assert _cents_to_amount(0) == "0.00"
+    assert _cents_to_amount(5) == "0.05"
+    assert _cents_to_amount(10) == "0.10"
+    assert _cents_to_amount(50) == "0.50"
+    assert _cents_to_amount(123) == "1.23"
+    # Negative cents clamp to zero — shouldn't happen in practice but
+    # the conversion must not emit a string pympp will reject.
+    assert _cents_to_amount(-5) == "0.00"
+
+
+def test_mpp_is_mainnet_accepts_aliases_and_raw_ids() -> None:
+    assert _mpp_is_mainnet("tempo-mainnet") is True
+    assert _mpp_is_mainnet("tempo") is True
+    assert _mpp_is_mainnet("4217") is True
+    assert _mpp_is_mainnet("tempo-testnet") is False
+    assert _mpp_is_mainnet("moderato") is False
+    assert _mpp_is_mainnet("42431") is False
+    # Garbage falls through to "not mainnet" — the gate validates the
+    # alias explicitly at construction, so this helper only gates the
+    # opt-in check.
+    assert _mpp_is_mainnet("gibberish") is False
+
+
+def test_mpp_gate_rejects_unknown_network() -> None:
+    with pytest.raises(ValueError):
+        MppGate(
+            destination_address="0xabc0000000000000000000000000000000000001",
+            network="solana",
+            prices=DEFAULT_PRICES,
+            mpp_handler=_FakeMppHandler(),
+        )
+
+
+# ----------------------------------------------------------------------
+# build_gate + Config wiring for PAYWALL=mpp
+# ----------------------------------------------------------------------
+
+
+def test_build_gate_mpp_returns_mpp_gate() -> None:
+    gate = build_gate(
+        _base_config(
+            paywall="mpp",
+            mpp_destination_address="0xabc0000000000000000000000000000000000001",
+            mpp_network="tempo-testnet",
+        )
+    )
+    assert isinstance(gate, MppGate)
+    assert gate.name == "mpp"
+    assert gate.chain_id == 42431
+
+
+def test_build_gate_mpp_requires_destination_address() -> None:
+    with pytest.raises(RuntimeError, match="mpp_destination_address"):
+        build_gate(
+            _base_config(paywall="mpp", mpp_destination_address=None)
+        )
+
+
+def test_build_gate_mpp_refuses_mainnet_without_opt_in() -> None:
+    with pytest.raises(RuntimeError, match="MPP_ALLOW_MAINNET"):
+        build_gate(
+            _base_config(
+                paywall="mpp",
+                mpp_destination_address="0xabc0000000000000000000000000000000000001",
+                mpp_network="tempo-mainnet",
+                mpp_allow_mainnet=False,
+            )
+        )
+
+
+def test_config_paywall_mpp_requires_destination(monkeypatch) -> None:
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.delenv("MPP_DESTINATION_ADDRESS", raising=False)
+    with pytest.raises(RuntimeError, match="MPP_DESTINATION_ADDRESS"):
+        Config.from_env()
+
+
+def test_config_paywall_mpp_with_address_loads(monkeypatch) -> None:
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.setenv(
+        "MPP_DESTINATION_ADDRESS", "0xabc0000000000000000000000000000000000001"
+    )
+    monkeypatch.setenv("MPP_NETWORK", "tempo-testnet")
+    cfg = Config.from_env()
+    assert cfg.paywall == "mpp"
+    assert cfg.mpp_destination_address == "0xabc0000000000000000000000000000000000001"
+    assert cfg.mpp_network == "tempo-testnet"
+
+
+def test_config_paywall_mpp_mainnet_requires_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.setenv(
+        "MPP_DESTINATION_ADDRESS", "0xabc0000000000000000000000000000000000001"
+    )
+    monkeypatch.setenv("MPP_NETWORK", "tempo-mainnet")
+    monkeypatch.delenv("MPP_ALLOW_MAINNET", raising=False)
+    with pytest.raises(RuntimeError, match="MPP_ALLOW_MAINNET"):
+        Config.from_env()
+
+
+def test_config_rejects_invalid_paywall_includes_mpp(monkeypatch) -> None:
+    """The 'unknown paywall' error message should mention both rails so
+    the operator knows mpp is a legitimate option."""
+    monkeypatch.setenv("PAYWALL", "stripe")
+    with pytest.raises(RuntimeError, match="mpp"):
+        Config.from_env()
+
+
+# ----------------------------------------------------------------------
+# MppGate ASGI middleware behavior
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def mpp_gate_with_challenge(fake_mcp_app: Starlette) -> tuple[MppGate, _FakeMppHandler]:
+    """An MppGate whose stubbed handler always returns a challenge.
+
+    Used to assert the 402 path — the response must include
+    ``WWW-Authenticate: Payment ...`` and a JSON-RPC error body with
+    code -32042 (payment-required per draft-payment-transport-mcp-00).
+    """
+    fake = _FakeMppHandler(result=_FakeChallenge())
+    gate = MppGate(
+        destination_address="0xabc0000000000000000000000000000000000001",
+        network="tempo-testnet",
+        prices=DEFAULT_PRICES,
+        mpp_handler=fake,
+    )
+    return gate, fake
+
+
+def test_mpp_returns_402_with_www_authenticate_on_unpaid_tool_call(
+    fake_mcp_app: Starlette,
+    mpp_gate_with_challenge: tuple[MppGate, _FakeMppHandler],
+) -> None:
+    gate, fake = mpp_gate_with_challenge
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool", "arguments": {}},
+    }
+    response = client.post("/mcp", json=rpc)
+
+    assert response.status_code == 402
+    # The WWW-Authenticate header is the defining feature of the MPP
+    # wire protocol — clients discover the payment challenge there.
+    www_auth = response.headers.get("www-authenticate", "")
+    assert www_auth.lower().startswith("payment ")
+    # MCP-aware clients dispatch on the JSON-RPC error code instead.
+    body = response.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 7
+    assert body["error"]["code"] == -32042
+    assert body["error"]["data"]["httpStatus"] == 402
+
+    # Handler was called with the computed amount.
+    assert len(fake.charge_calls) == 1
+    # summarize_debt_tool = 50 cents = "0.50"
+    assert fake.charge_calls[0]["amount"] == "0.50"
+    # Tool name is plumbed through so pympp can include it in the
+    # challenge metadata for client-side introspection.
+    assert fake.charge_calls[0]["extra"] == {"tool": "summarize_debt_tool"}
+
+
+def test_mpp_tools_list_is_free(
+    fake_mcp_app: Starlette,
+    mpp_gate_with_challenge: tuple[MppGate, _FakeMppHandler],
+) -> None:
+    """Discovery must not be charged — the LLM can't know what it's
+    paying for until it's enumerated the tools."""
+    gate, fake = mpp_gate_with_challenge
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    response = client.post("/mcp", json=rpc)
+    assert response.status_code == 200
+    assert response.json()["result"] == "ok"
+    # Handler is never consulted for free endpoints.
+    assert fake.charge_calls == []
+
+
+def test_mpp_initialize_is_free(
+    fake_mcp_app: Starlette,
+    mpp_gate_with_challenge: tuple[MppGate, _FakeMppHandler],
+) -> None:
+    gate, _ = mpp_gate_with_challenge
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}}
+    response = client.post("/mcp", json=rpc)
+    assert response.status_code == 200
+
+
+def test_mpp_ignores_non_mcp_paths(
+    mpp_gate_with_challenge: tuple[MppGate, _FakeMppHandler],
+) -> None:
+    """Gate only wraps POSTs to /mcp. Health checks, SSE GETs, and
+    anything else on the host must pass through untouched."""
+    gate, fake = mpp_gate_with_challenge
+
+    async def health(request: Request) -> JSONResponse:
+        return JSONResponse({"ok": True})
+
+    app = Starlette(
+        routes=[
+            Route("/mcp", _fake_mcp_endpoint, methods=["POST"]),
+            Route("/healthz", health, methods=["GET"]),
+        ]
+    )
+    client = TestClient(gate.asgi_middleware(app))
+    assert client.get("/healthz").status_code == 200
+    assert fake.charge_calls == []
+
+
+def test_mpp_non_mcp_post_path_bypasses_gate(
+    mpp_gate_with_challenge: tuple[MppGate, _FakeMppHandler],
+) -> None:
+    """Tool-call JSON on some other path must not be gated — avoids
+    surprising operators who mount additional JSON-RPC apps alongside
+    the MCP one."""
+    gate, fake = mpp_gate_with_challenge
+
+    async def echo(request: Request) -> JSONResponse:
+        body = await request.json()
+        return JSONResponse({"saw": body.get("method")})
+
+    app = Starlette(routes=[Route("/other", echo, methods=["POST"])])
+    client = TestClient(gate.asgi_middleware(app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool"},
+    }
+    response = client.post("/other", json=rpc)
+    assert response.status_code == 200
+    assert response.json()["saw"] == "tools/call"
+    assert fake.charge_calls == []
+
+
+def test_mpp_valid_credential_forwards_and_attaches_receipt(
+    fake_mcp_app: Starlette,
+) -> None:
+    """Happy path: handler returns (credential, receipt) → gate lets the
+    request through and injects the receipt header on the outgoing 200."""
+    receipt = _FakeReceipt(header="ok-receipt-b64")
+    # Any sentinel value stands in for the credential; the gate doesn't
+    # introspect it today.
+    fake = _FakeMppHandler(result=(object(), receipt))
+    gate = MppGate(
+        destination_address="0xabc0000000000000000000000000000000000001",
+        network="tempo-testnet",
+        prices=DEFAULT_PRICES,
+        mpp_handler=fake,
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool", "arguments": {}},
+    }
+    response = client.post(
+        "/mcp",
+        json=rpc,
+        headers={"Authorization": "Payment eyJtb2NrIjogInRva2VuIn0"},
+    )
+    assert response.status_code == 200
+    assert response.json()["result"] == "ok"
+    # pympp-native receipt header.
+    assert response.headers.get("payment-receipt") == "ok-receipt-b64"
+    # Also emitted as Authentication-Info for IETF-draft-aligned clients.
+    assert response.headers.get("authentication-info") == "ok-receipt-b64"
+    # Authorization header reached the pympp handler intact.
+    assert fake.charge_calls[0]["authorization"] == "Payment eyJtb2NrIjogInRva2VuIn0"
+
+
+def test_mpp_handler_exception_falls_back_to_challenge(
+    fake_mcp_app: Starlette,
+) -> None:
+    """If pympp's charge() raises on a malformed credential, the gate
+    must not 5xx — it re-calls with ``authorization=None`` to mint a
+    fresh challenge and returns 402."""
+
+    class Explodes:
+        calls: list[dict] = []
+
+        async def charge(self, *, authorization, amount, extra=None, **kwargs):
+            Explodes.calls.append(
+                {
+                    "authorization": authorization,
+                    "amount": amount,
+                    "extra": extra,
+                }
+            )
+            # First call with malformed auth → raise. Second call with
+            # authorization=None → return challenge.
+            if authorization is not None:
+                raise ValueError("malformed payload")
+            return _FakeChallenge()
+
+    gate = MppGate(
+        destination_address="0xabc0000000000000000000000000000000000001",
+        network="tempo-testnet",
+        prices=DEFAULT_PRICES,
+        mpp_handler=Explodes(),
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool"},
+    }
+    response = client.post(
+        "/mcp",
+        json=rpc,
+        headers={"Authorization": "Payment not-really-valid"},
+    )
+    assert response.status_code == 402
+    assert response.headers.get("www-authenticate", "").lower().startswith("payment ")
+    # Two handler invocations: the failing one, then the recovery.
+    assert len(Explodes.calls) == 2
+    assert Explodes.calls[0]["authorization"] == "Payment not-really-valid"
+    assert Explodes.calls[1]["authorization"] is None
+
+
+def test_mpp_body_is_replayed_to_downstream(
+    fake_mcp_app: Starlette,
+    mpp_gate_with_challenge: tuple[MppGate, _FakeMppHandler],
+) -> None:
+    """When the gate passes through (tools/list), the wrapped handler
+    must still see the original body — we consume the receive channel
+    to peek the JSON-RPC method, so we have to replay it intact."""
+    gate, _ = mpp_gate_with_challenge
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {"jsonrpc": "2.0", "id": 456, "method": "tools/list", "params": {}}
+    response = client.post("/mcp", json=rpc)
+    assert response.status_code == 200
+    # The echo endpoint returns the id from the parsed body — if replay
+    # were broken it would raise or return null.
+    assert response.json()["id"] == 456
+
+
+def test_mpp_batch_with_tool_call_gates_entire_batch(
+    fake_mcp_app: Starlette,
+    mpp_gate_with_challenge: tuple[MppGate, _FakeMppHandler],
+) -> None:
+    """A JSON-RPC batch containing a tools/call → 402. Matches the
+    x402 policy: per-method metering in a batch is a follow-up."""
+    gate, _ = mpp_gate_with_challenge
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    batch = [
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "get_balances_tool"},
+        },
+    ]
+    response = client.post(
+        "/mcp",
+        content=json.dumps(batch).encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert response.status_code == 402
+
+
+def test_mpp_noop_factory_still_returns_noop() -> None:
+    """Adding the MPP branch must not regress the noop default."""
+    gate = build_gate(_base_config(paywall="none"))
+    assert isinstance(gate, NoopGate)
+
+
+def test_mpp_paymentgate_protocol_is_satisfied(mpp_gate_with_challenge) -> None:
+    gate, _ = mpp_gate_with_challenge
+    assert callable(gate.asgi_middleware)
+    g: PaymentGate = gate  # noqa: F841 — mypy shape check.
+
+
+# ----------------------------------------------------------------------
+# Online-optional: live Tempo testnet (skipped without key)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.mpp_testnet
+def test_mpp_live_tempo_testnet_payment_round_trip(fake_mcp_app: Starlette) -> None:
+    """End-to-end against a real Tempo testnet (Moderato) RPC.
+
+    Requires a funded wallet key in ``MPP_TESTNET_PRIVATE_KEY``. The
+    test spins up a real MppGate, hits it unpaid to collect the
+    challenge, signs a credential with pympp's Tempo client, and
+    replays. Skipped without the key.
+    """
+    private_key = os.getenv("MPP_TESTNET_PRIVATE_KEY", "").strip()
+    if not private_key:
+        pytest.skip(
+            "MPP_TESTNET_PRIVATE_KEY not set — skipping live Tempo testnet test."
+        )
+
+    # Imports inside the test so the offline suite doesn't pull pytempo
+    # (native extension) if someone strips the extra.
+    from mpp import Challenge
+    from mpp.methods.tempo import ChargeIntent, TempoAccount
+    from mpp.methods.tempo import tempo as tempo_method
+
+    account = TempoAccount.from_key(private_key)
+    destination = os.getenv(
+        "MPP_TESTNET_DESTINATION_ADDRESS", account.address
+    )
+
+    gate = MppGate(
+        destination_address=destination,
+        network="tempo-testnet",
+        # Default-rate 1 cent so the test spends the minimum meaningful
+        # amount of testnet tokens.
+        prices=PriceTable(prices={}, default_cents=1),
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "live_mpp_test_tool", "arguments": {}},
+    }
+
+    # Step 1: unpaid probe → 402 + WWW-Authenticate.
+    probe = client.post("/mcp", json=rpc)
+    assert probe.status_code == 402
+    www_auth = probe.headers.get("www-authenticate", "")
+    challenge = Challenge.from_www_authenticate(www_auth)
+
+    # Step 2: sign a credential via pympp's Tempo client.
+    client_method = tempo_method(
+        account=account,
+        chain_id=42431,
+        intents={"charge": ChargeIntent(chain_id=42431)},
+    )
+    import asyncio
+
+    credential = asyncio.run(client_method.create_credential(challenge))
+
+    # Step 3: replay with the Authorization: Payment header.
+    paid = client.post(
+        "/mcp",
+        json=rpc,
+        headers={"Authorization": credential.to_authorization()},
+    )
+    assert paid.status_code == 200, paid.text
+    # Receipt header surfaced on the successful response.
+    assert "payment-receipt" in {k.lower() for k in paid.headers.keys()}

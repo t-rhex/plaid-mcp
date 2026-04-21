@@ -1,6 +1,10 @@
 version = 1
 revision = 3
 requires-python = ">=3.10"
+resolution-markers = [
+    "python_full_version >= '3.11'",
+    "python_full_version < '3.11'",
+]
 
 [[package]]
 name = "aiofile"
@@ -1811,6 +1815,9 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "ruff" },
 ]
+mpp = [
+    { name = "pympp", extra = ["server", "tempo"], marker = "python_full_version >= '3.11'" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1820,6 +1827,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "plaid-python", specifier = ">=36.0.0" },
     { name = "pydantic", specifier = ">=2.6" },
+    { name = "pympp", extras = ["tempo", "server"], marker = "python_full_version >= '3.11' and extra == 'mpp'", specifier = ">=0.6,<1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", specifier = ">=1.0" },
@@ -1827,7 +1835,7 @@ requires-dist = [
     { name = "textual", specifier = ">=0.80" },
     { name = "x402", extras = ["evm"], specifier = ">=2.8.0,<3" },
 ]
-provides-extras = ["dev", "cdp"]
+provides-extras = ["dev", "cdp", "mpp"]
 
 [[package]]
 name = "plaid-python"
@@ -2218,12 +2226,53 @@ crypto = [
 ]
 
 [[package]]
+name = "pympp"
+version = "0.6.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx", marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/90/18/9e021da617fe99e680c8eecc15a27445c85922dc0ab2987d94d55470db52/pympp-0.6.0.tar.gz", hash = "sha256:8c42eb811351c8bf73d61743ab3f5ac0641b1dfae3b966631454d6ecc99d0e0d", size = 134217, upload-time = "2026-04-07T15:31:08.201Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/03/dd/283a8812f5e542eb1e67ae5418552237089f0e4f1bfed02e7ca363853c1f/pympp-0.6.0-py3-none-any.whl", hash = "sha256:c04852dbb4f119d19253064fe0c79acbdbe77322bf78e04a062c8186b118c419", size = 80700, upload-time = "2026-04-07T15:31:06.63Z" },
+]
+
+[package.optional-dependencies]
+server = [
+    { name = "pydantic", marker = "python_full_version >= '3.11'" },
+]
+tempo = [
+    { name = "attrs", marker = "python_full_version >= '3.11'" },
+    { name = "eth-account", marker = "python_full_version >= '3.11'" },
+    { name = "eth-hash", extra = ["pycryptodome"], marker = "python_full_version >= '3.11'" },
+    { name = "pydantic", marker = "python_full_version >= '3.11'" },
+    { name = "pytempo", marker = "python_full_version >= '3.11'" },
+    { name = "rlp", marker = "python_full_version >= '3.11'" },
+]
+
+[[package]]
 name = "pyperclip"
 version = "1.11.0"
 source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e8/52/d87eba7cb129b81563019d1679026e7a112ef76855d6159d24754dbd2a51/pyperclip-1.11.0.tar.gz", hash = "sha256:244035963e4428530d9e3a6101a1ef97209c6825edab1567beac148ccc1db1b6", size = 12185, upload-time = "2025-09-26T14:40:37.245Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/df/80/fc9d01d5ed37ba4c42ca2b55b4339ae6e200b456be3a1aaddf4a9fa99b8c/pyperclip-1.11.0-py3-none-any.whl", hash = "sha256:299403e9ff44581cb9ba2ffeed69c7aa96a008622ad0c46cb575ca75b5b84273", size = 11063, upload-time = "2025-09-26T14:40:36.069Z" },
+]
+
+[[package]]
+name = "pytempo"
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs", marker = "python_full_version >= '3.11'" },
+    { name = "eth-account", marker = "python_full_version >= '3.11'" },
+    { name = "eth-utils", marker = "python_full_version >= '3.11'" },
+    { name = "rlp", marker = "python_full_version >= '3.11'" },
+    { name = "web3", marker = "python_full_version >= '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/e5/209f8f2d28752e26162a20e6156051fa6211df6e564c57e00384e85543e5/pytempo-0.5.0.tar.gz", hash = "sha256:b39a948bb856d875e7cf03f1da540acd2035dcc4e5eebc1295bcfc574772a3b4", size = 266722, upload-time = "2026-04-10T08:02:22.939Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2b/ac/5778ad503a1a59d6d23f16db6dda888155da033742ce16a4e3ea0df6ac29/pytempo-0.5.0-py3-none-any.whl", hash = "sha256:8f82fed21db0fe3f503f796f3b70f8d2e4b7edd7e60c89e4da1855109c2cfc2e", size = 38437, upload-time = "2026-04-10T08:02:21.559Z" },
 ]
 
 [[package]]
