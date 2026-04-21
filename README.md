@@ -1,8 +1,8 @@
 # plaid-mcp
 
-A read-only [Model Context Protocol](https://modelcontextprotocol.io) server that lets Claude, ChatGPT, or any MCP-compatible client analyze your real bank, credit card, loan, and brokerage data through [Plaid](https://plaid.com).
+A read-only [Model Context Protocol](https://modelcontextprotocol.io) server that lets Claude, ChatGPT, or any MCP-compatible client analyze your real bank, credit card, loan, and brokerage data through [Plaid](https://plaid.com) or [Teller](https://teller.io).
 
-Bring your own Plaid developer credentials, run the server locally (or on a small VPS), link your accounts through Plaid's Hosted Link flow, and then just ask:
+Bring your own credentials, run the server locally (or behind TLS on a small VPS), link your accounts, and then just ask:
 
 > *"What did I spend on groceries in March?"*
 > *"Show me my credit card APRs sorted by balance."*
@@ -19,10 +19,14 @@ Everything runs locally. Access tokens stay in a chmod-600 SQLite file on your m
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Setup (detailed)](#setup-detailed)
+- [Choosing a provider](#choosing-a-provider)
 - [Connecting it to an MCP client](#connecting-it-to-an-mcp-client)
+- [Terminal UI](#terminal-ui)
 - [Tool reference](#tool-reference)
 - [Example workflows](#example-workflows)
 - [How linking works under the hood](#how-linking-works-under-the-hood)
+- [Paid hosted mode (x402)](#paid-hosted-mode-x402)
+- [Deploying with Docker / Fly.io](#deploying-with-docker--flyio)
 - [Security notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -164,6 +168,52 @@ You can also link new accounts directly from inside Claude/ChatGPT after the ser
 
 ---
 
+## Choosing a provider
+
+`plaid-mcp` speaks to two bank-data providers behind a shared adapter. Pick the one that matches what you want to analyze:
+
+|                                | **Plaid** (default) | **Teller** |
+|--------------------------------|---------------------|------------|
+| Environment variable           | `PROVIDER=plaid`    | `PROVIDER=teller` |
+| Checking / savings / credit    | ✓                   | ✓ |
+| Balances                       | ✓                   | ✓ |
+| Transactions (categorized)     | ✓ (cursor sync)     | ✓ (live date range) |
+| Identity                       | ✓                   | ✓ |
+| Investment holdings + trades   | ✓                   | ✗ |
+| Liabilities (APRs, due dates)  | ✓                   | ✗ |
+| Student loans / mortgages      | ✓                   | ✗ |
+| Income detection               | ✓                   | ✗ |
+| Debt avalanche/snowball tools  | ✓                   | ✗ (needs APRs) |
+| Free personal-use tier         | 10 linked items     | 100 live connections |
+| Transparent per-call pricing   | Contact sales       | Published rate card |
+
+**Generic tools** (`list_accounts`, `get_balances`, `get_transactions`, `search_transactions`, `get_identity`) work on either provider. **Plaid-only tools** (everything else) return a clean capability error when `PROVIDER=teller`, so Teller users aren't left with confusing tracebacks.
+
+You can freely switch by changing `PROVIDER` in your `.env` — each provider stores its enrollments independently (Plaid in SQLite, Teller in `~/.plaid-mcp/teller/enrollment.json`), so nothing is lost.
+
+### Teller setup
+
+```bash
+# 1. Register at dashboard.teller.io (free), grab your Application ID
+# 2. Download certificate.zip; move to ~/.plaid-mcp/teller/ (0600)
+# 3. Add to .env:
+PROVIDER=teller
+TELLER_APPLICATION_ID=app_xxxxxxxxxxxxxxxxxxxxx
+TELLER_ENV=sandbox                # sandbox needs no cert; dev/prod do
+TELLER_CERT_PATH=~/.plaid-mcp/teller/certificate.pem
+TELLER_KEY_PATH=~/.plaid-mcp/teller/private_key.pem
+
+# 4. Link your first bank (either in your terminal or from the TUI)
+plaid-mcp teller connect
+
+# 5. Smoke-test
+plaid-mcp teller probe
+```
+
+Sandbox credentials in Teller Connect: **`username` / `password`** against any bank. That returns a real sandbox `access_token` you can actually query.
+
+---
+
 ## Connecting it to an MCP client
 
 ### Claude Desktop (local, stdio)
@@ -228,6 +278,18 @@ Expose it with TLS (Caddy, Cloudflare Tunnel, ngrok). In Claude.ai or ChatGPT ad
 ### Other clients
 
 Anything that speaks MCP will work. The server is built on [FastMCP](https://github.com/jlowin/fastmcp), which supports both stdio and HTTP transports.
+
+---
+
+## Terminal UI
+
+If you prefer browsing your accounts directly rather than asking an LLM, run:
+
+```bash
+plaid-mcp tui
+```
+
+Opens a [Textual](https://github.com/textualize/textual) app with Accounts + Transactions screens, works with either provider, zero-friction navigation (`q` to quit, `r` to refresh, `a`/`t` to switch screens, `c` to link a new bank through Teller Connect without leaving the terminal).
 
 ---
 
@@ -367,6 +429,63 @@ This server uses Plaid's **Hosted Link** flow so you never need to embed a web w
 3. **`complete_linking(link_token)`** — polls `/link/token/get` until it sees a `public_token` in `link_sessions[].results.item_add_results[]`, exchanges it for a permanent `access_token`, and caches the account list.
 
 Per Plaid's docs, webhooks (`SESSION_FINISHED` event) are the *recommended* production mechanism for retrieving the `public_token`. This server uses polling instead because it requires no public endpoint — fine for personal CLI / stdio use. If you deploy remotely and want webhook-driven completion, set `PLAID_WEBHOOK_URL` in `.env` and add a webhook handler (not included yet — PRs welcome).
+
+---
+
+## Paid hosted mode (x402)
+
+If you host `plaid-mcp serve` and want to let agents pay per tool call instead of giving them an API key, set the `PAYWALL=x402` env var. Every `tools/call` JSON-RPC request is then metered via Coinbase's [x402](https://x402.org/) protocol (HTTP 402 + USDC settlement on Base). Tool discovery (`tools/list`, `initialize`) stays free.
+
+```ini
+# Opt-in. Default is PAYWALL=none (stdio + HTTP both run free).
+PAYWALL=x402
+X402_RECEIVING_ADDRESS=0x...             # Base address that receives USDC
+X402_NETWORK=base-sepolia                # testnet default; `base` = mainnet
+# X402_ALLOW_MAINNET=true                # required to actually open mainnet
+# X402_FACILITATOR_URL=                  # optional (defaults to https://x402.org/facilitator)
+```
+
+Default prices live in `src/plaid_mcp/payments/prices.py` (10¢ for most tools, 50¢ for `summarize_debt_tool`). Override per-tool by forking or by building your own `PriceTable` if you embed this as a library.
+
+**Flow per call**: client hits the server with no payment → server returns `402 Payment Required` with signed `accepts` array → client signs an EIP-3009 `transferWithAuthorization` payload → client replays the call with `X-PAYMENT` header → server calls the facilitator to verify → server runs the tool → server calls the facilitator to settle on-chain → response includes `X-Payment-Response` header with the settlement tx hash.
+
+### Client-side support
+
+- **Claude Desktop / Claude Code / Cursor** — install Coinbase's [x402 MCP bridge](https://docs.cdp.coinbase.com/x402/mcp-server) alongside `plaid-mcp`. The bridge holds the Base wallet and does the signing; `plaid-mcp` stays crypto-naive.
+- **OpenAI Agents SDK / LangChain** — `pip install "x402[httpx]"`, wrap the tool's HTTP client with the x402 client middleware.
+- **CDP Agent Kit** — native x402 actions; nothing extra to install.
+- **ChatGPT Custom Connectors** — no wallet primitive today; use an API-key fallback if you need this audience (not implemented yet).
+
+### Verified end-to-end
+
+Live Base Sepolia round-trip tests ship under the `x402_testnet` pytest marker. Set `X402_TESTNET_PRIVATE_KEY` to a funded Base Sepolia wallet and run:
+
+```bash
+X402_TESTNET_PRIVATE_KEY=0x...                                     \
+X402_RECEIVING_ADDRESS=0x<your-wallet-or-throwaway>                \
+  uv run pytest -v -m x402_testnet
+```
+
+Get testnet USDC from [Circle's faucet](https://faucet.circle.com) (pick **Base Sepolia**).
+
+---
+
+## Deploying with Docker / Fly.io
+
+A reference Dockerfile, `docker-compose.yml`, and Fly.io config live at the repo root + `deploy/`. See [`deploy/README.md`](deploy/README.md) for the step-by-step.
+
+```bash
+# Local hosted-mode smoke test
+docker compose up --build
+
+# Fly.io one-shot
+fly apps create plaid-mcp
+fly volumes create plaid_mcp_data --region iad --size 1
+fly secrets set $(grep -v '^#' .env | xargs)
+fly deploy --config deploy/fly.toml
+```
+
+The container runs `plaid-mcp serve --host 0.0.0.0 --port 8080` as a non-root user, persists `~/.plaid-mcp/` on a named volume, and survives restarts with all Plaid items + Teller enrollment intact. Fly terminates TLS at the edge; self-hosting behind Caddy/Traefik/nginx works the same way.
 
 ---
 
