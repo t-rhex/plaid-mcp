@@ -852,3 +852,70 @@ def test_x402_live_base_sepolia_payment_round_trip(fake_mcp_app: Starlette) -> N
     )
     assert paid.status_code == 200, paid.text
     assert "x-payment-response" in {k.lower() for k in paid.headers.keys()}
+
+
+@pytest.mark.x402_mainnet
+def test_x402_live_base_mainnet_payment_round_trip(fake_mcp_app: Starlette) -> None:
+    """End-to-end against the hosted facilitator on Base **mainnet** — spends
+    REAL USDC.
+
+    Costs 1 cent of real USDC per run when the sender equals the receiver,
+    because the facilitator pays gas and the principal loops back to you.
+    Set a different ``X402_MAINNET_RECEIVING_ADDRESS`` to send the cent to
+    someone else (or to a throwaway you want to burn).
+
+    Guardrails:
+      - Skipped unless ``X402_MAINNET_PRIVATE_KEY`` is set. Deliberate: the
+        testnet variant uses ``X402_TESTNET_PRIVATE_KEY`` so that an operator
+        with only a testnet key configured can't accidentally hit mainnet.
+      - The mainnet opt-in lives in ``build_gate(config)``; constructing
+        ``X402Gate`` directly (as we do here) skips that policy guard, so
+        this test is the only code path that can construct a mainnet gate
+        without setting ``X402_ALLOW_MAINNET=true``.
+    """
+    private_key = os.getenv("X402_MAINNET_PRIVATE_KEY", "").strip()
+    if not private_key:
+        pytest.skip(
+            "X402_MAINNET_PRIVATE_KEY not set — skipping live Base mainnet test."
+        )
+
+    from eth_account import Account
+    from x402 import x402Client
+    from x402.mechanisms.evm.exact import ExactEvmClientScheme
+    from x402.mechanisms.evm.signers import EthAccountSigner
+    from x402.schemas import PaymentRequired
+
+    signer = EthAccountSigner(Account.from_key(private_key))
+    receiver = os.getenv(
+        "X402_MAINNET_RECEIVING_ADDRESS", signer.address
+    )
+
+    gate = X402Gate(
+        receiving_address=receiver,
+        network="base",
+        prices=PriceTable(prices={}, default_cents=1),
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "live_mainnet_test_tool", "arguments": {}},
+    }
+    probe = client.post("/mcp", json=rpc)
+    assert probe.status_code == 402
+    required = PaymentRequired.model_validate(probe.json())
+
+    x402_client = x402Client()
+    # Base mainnet = eip155:8453.
+    x402_client.register("eip155:8453", ExactEvmClientScheme(signer=signer))
+    import asyncio
+    payload = asyncio.run(x402_client.create_payment_payload(required))
+
+    paid = client.post(
+        "/mcp",
+        json=rpc,
+        headers={"X-PAYMENT": payload.model_dump_json(by_alias=True)},
+    )
+    assert paid.status_code == 200, paid.text
+    assert "x-payment-response" in {k.lower() for k in paid.headers.keys()}

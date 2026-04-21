@@ -53,6 +53,7 @@ asyncio_mode = "auto"
 markers = [
     "sandbox: tests that hit the real Plaid sandbox API (skipped without .env.test)",
     "x402_testnet: tests that hit a live x402 facilitator on Base Sepolia (skipped without X402_TESTNET_PRIVATE_KEY)",
+    "x402_mainnet: tests that spend REAL USDC on Base mainnet (skipped unless X402_MAINNET_PRIVATE_KEY is set — opt-in only)",
 ]
 testpaths = ["tests"]
 
