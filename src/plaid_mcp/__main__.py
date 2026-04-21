@@ -145,8 +145,9 @@ def tui_cmd() -> None:
 
     Works with whichever provider is selected in ``PROVIDER``. If no
     enrollment exists for that provider the TUI opens on an instructional
-    empty screen.
+    empty screen — the user can press ``c`` in-app to link a bank.
     """
+    from .providers import Provider
     from .tui import PlaidMcpTUI
 
     cfg = Config.from_env()
@@ -154,8 +155,20 @@ def tui_cmd() -> None:
     enrollment = _pick_tui_enrollment(cfg, storage)
 
     provider = build_provider(cfg, storage) if enrollment is not None else None
+
+    # Factory so the TUI can rebuild the provider after a fresh Connect.
+    # The new enrollment is already persisted by run_connect_flow(); we
+    # just need to hand back a provider wired to the same Config.
+    def _factory(_new_enrollment: Enrollment) -> Provider:
+        return build_provider(cfg, storage)
+
     try:
-        app = PlaidMcpTUI(provider=provider, enrollment=enrollment)
+        app = PlaidMcpTUI(
+            provider=provider,
+            enrollment=enrollment,
+            config=cfg,
+            provider_factory=_factory,
+        )
         app.run()
     finally:
         close = getattr(provider, "close", None)

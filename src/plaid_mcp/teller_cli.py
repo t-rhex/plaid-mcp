@@ -16,6 +16,7 @@ import socket
 import socketserver
 import threading
 import webbrowser
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
@@ -138,31 +139,46 @@ def teller_group() -> None:
     """Teller provider commands."""
 
 
-@teller_group.command("connect")
-@click.option("--port", default=0, type=int,
-              help="Local port (default: 8765 or next free)")
-@click.option("--timeout", default=300, type=int,
-              help="Seconds to wait for the user to finish linking")
-@click.option("--no-open", is_flag=True,
-              help="Don't auto-open the browser")
-def connect_cmd(port: int, timeout: int, no_open: bool) -> None:
-    """Link a bank through Teller Connect (browser flow).
+class ConnectTimeout(RuntimeError):
+    """Raised internally when the user never finishes the Connect flow."""
 
-    Starts a throwaway localhost server, opens the Teller Connect widget in
-    your browser, waits for the onSuccess callback, and saves the resulting
-    enrollment. Nothing leaves your machine except the call from the widget
-    to Teller's own servers.
+
+class ConnectCancelled(RuntimeError):
+    """Raised internally when the user cancels or the browser reports an error."""
+
+
+def run_connect_flow(
+    cfg: Config,
+    *,
+    port: int = 0,
+    timeout: int = 300,
+    open_browser: bool = True,
+    on_status: Callable[[str], None] | None = None,
+) -> Enrollment | None:
+    """Run the localhost + browser Teller Connect flow.
+
+    This is the reusable core of ``plaid-mcp teller connect`` — the Click
+    command is a thin wrapper. The TUI calls it from a background worker so
+    the UI stays responsive while the user finishes linking in the browser.
+
+    On success, the enrollment is written to ``~/.plaid-mcp/teller/
+    enrollment.json`` (chmod 600) and returned. On timeout or user cancel
+    this returns ``None``. Status strings are passed to ``on_status`` for
+    user-visible progress ("Waiting for browser…", "Saving…", etc.).
+
+    Raises ``ValueError`` only for config problems (missing application id);
+    network / user errors are surfaced via ``None`` + the status callback so
+    callers don't have to wrap every call in try/except.
     """
-    cfg = Config.from_env()
-    if not cfg.teller_application_id:
-        click.echo(
-            "TELLER_APPLICATION_ID is not set. Get it from "
-            "https://dashboard.teller.io and add it to .env.",
-            err=True,
-        )
-        raise SystemExit(2)
+    status = on_status or (lambda _msg: None)
 
-    port = port or _free_port()
+    if not cfg.teller_application_id:
+        raise ValueError(
+            "TELLER_APPLICATION_ID is not set. Get it from "
+            "https://dashboard.teller.io and add it to .env."
+        )
+
+    actual_port = port or _free_port()
     html = (
         _CONNECT_HTML
         .replace("__APPID__", cfg.teller_application_id)
@@ -188,7 +204,7 @@ def connect_cmd(port: int, timeout: int, no_open: bool) -> None:
                 self.send_response(404)
                 self.end_headers()
 
-        def _finish_response(self, status: int, body: bytes) -> None:
+        def _finish_response(self, code: int, body: bytes) -> None:
             """Write a complete response and flush before returning.
 
             The fetch() on the browser side waits for the server to close the
@@ -196,7 +212,7 @@ def connect_cmd(port: int, timeout: int, no_open: bool) -> None:
             the write flushes, the fetch hangs — which looked like the browser
             being stuck on "saving…". Explicit headers + flush avoid that.
             """
-            self.send_response(status)
+            self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Connection", "close")
@@ -211,8 +227,7 @@ def connect_cmd(port: int, timeout: int, no_open: bool) -> None:
             if self.path == "/callback":
                 try:
                     result["payload"] = json.loads(payload.decode() or "{}")
-                    body = b'{"ok":true}'
-                    self._finish_response(200, body)
+                    self._finish_response(200, b'{"ok":true}')
                 except json.JSONDecodeError:
                     result["error"] = "invalid JSON from Connect onSuccess"
                     self._finish_response(400, b'{"error":"bad_json"}')
@@ -224,20 +239,24 @@ def connect_cmd(port: int, timeout: int, no_open: bool) -> None:
             else:
                 self._finish_response(404, b'{"error":"not_found"}')
 
-    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", port), Handler)
+    httpd = socketserver.ThreadingTCPServer(("127.0.0.1", actual_port), Handler)
     httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
 
-    url = f"http://127.0.0.1:{port}/"
-    click.echo(f"\nOpen {url} in your browser to link a bank.")
-    click.echo(f"Environment: {cfg.teller_env}. Sandbox creds: username / password.\n")
-    if not no_open:
+    url = f"http://127.0.0.1:{actual_port}/"
+    status(f"Open {url} in your browser to link a bank.")
+    status(
+        f"Environment: {cfg.teller_env}. "
+        "Sandbox creds: username / password."
+    )
+    if open_browser:
         try:
             webbrowser.open(url)
         except Exception:  # noqa: BLE001
             pass
 
+    status("Waiting for you to finish in the browser…")
     try:
         finished = done.wait(timeout=timeout)
         # Small settle delay so the handler's response fully flushes to the
@@ -250,18 +269,57 @@ def connect_cmd(port: int, timeout: int, no_open: bool) -> None:
         httpd.server_close()
 
     if not finished:
-        click.echo("Timed out waiting for Connect.", err=True)
-        raise SystemExit(1)
+        status("Timed out waiting for Connect.")
+        return None
     if "error" in result:
-        click.echo(f"Connect ended: {result['error']}", err=True)
-        raise SystemExit(1)
+        status(f"Connect ended: {result['error']}")
+        return None
 
+    status("Saving…")
     provider = _build_provider(cfg)
     try:
         enrollment = provider.complete_enrollment(result["payload"])
     finally:
         provider.close()
     _write_enrollment(enrollment)
+
+    status(
+        f"Linked {enrollment.institution_name or 'institution'} "
+        f"({enrollment.id}). Saved to {_ENROLL_PATH}."
+    )
+    return enrollment
+
+
+@teller_group.command("connect")
+@click.option("--port", default=0, type=int,
+              help="Local port (default: 8765 or next free)")
+@click.option("--timeout", default=300, type=int,
+              help="Seconds to wait for the user to finish linking")
+@click.option("--no-open", is_flag=True,
+              help="Don't auto-open the browser")
+def connect_cmd(port: int, timeout: int, no_open: bool) -> None:
+    """Link a bank through Teller Connect (browser flow).
+
+    Starts a throwaway localhost server, opens the Teller Connect widget in
+    your browser, waits for the onSuccess callback, and saves the resulting
+    enrollment. Nothing leaves your machine except the call from the widget
+    to Teller's own servers.
+    """
+    cfg = Config.from_env()
+    try:
+        enrollment = run_connect_flow(
+            cfg,
+            port=port,
+            timeout=timeout,
+            open_browser=not no_open,
+            on_status=lambda msg: click.echo(msg),
+        )
+    except ValueError as e:
+        click.echo(str(e), err=True)
+        raise SystemExit(2) from e
+
+    if enrollment is None:
+        raise SystemExit(1)
 
     click.echo(
         f"\n✓ Linked {enrollment.institution_name or 'institution'} "
