@@ -1393,6 +1393,294 @@ def test_mpp_paymentgate_protocol_is_satisfied(mpp_gate_with_challenge) -> None:
 
 
 # ----------------------------------------------------------------------
+# MPP + Stripe — multi-method (Tempo + Stripe cards) rail tests.
+#
+# The gate speaks to pympp one ``Mpp`` handler per method. Tests below
+# stub those handlers so we can exercise the 402 / dispatch paths
+# without hitting Stripe or Tempo.
+# ----------------------------------------------------------------------
+
+
+def test_mpp_config_stripe_without_secret_key_raises(monkeypatch) -> None:
+    """Operator sets MPP_METHODS=stripe but forgets STRIPE_SECRET_KEY —
+    Config.from_env must abort at startup with a message pointing at
+    the missing env var."""
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.setenv("MPP_METHODS", "stripe")
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    # MPP_DESTINATION_ADDRESS isn't required for stripe-only, which is
+    # part of the contract — ensure that's not what we're tripping on.
+    monkeypatch.delenv("MPP_DESTINATION_ADDRESS", raising=False)
+    with pytest.raises(RuntimeError, match="STRIPE_SECRET_KEY"):
+        Config.from_env()
+
+
+def test_mpp_config_stripe_with_secret_loads(monkeypatch) -> None:
+    """Stripe-only config without a Tempo address succeeds when
+    STRIPE_SECRET_KEY is provided."""
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.setenv("MPP_METHODS", "stripe")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc123")
+    monkeypatch.delenv("MPP_DESTINATION_ADDRESS", raising=False)
+    cfg = Config.from_env()
+    assert cfg.mpp_methods == ["stripe"]
+    assert cfg.stripe_secret_key == "sk_test_abc123"
+    assert cfg.mpp_destination_address is None
+
+
+def test_mpp_config_both_methods_loads(monkeypatch) -> None:
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.setenv("MPP_METHODS", "tempo,stripe")
+    monkeypatch.setenv(
+        "MPP_DESTINATION_ADDRESS", "0xabc0000000000000000000000000000000000001"
+    )
+    monkeypatch.setenv("MPP_NETWORK", "tempo-testnet")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_abc123")
+    monkeypatch.setenv("STRIPE_PAYMENT_METHOD_TYPES", "card,apple_pay")
+    monkeypatch.setenv("STRIPE_CURRENCY", "usd")
+    cfg = Config.from_env()
+    assert cfg.mpp_methods == ["tempo", "stripe"]
+    assert cfg.stripe_payment_method_types == ["card", "apple_pay"]
+    assert cfg.stripe_currency == "usd"
+
+
+def test_mpp_config_unknown_method_raises(monkeypatch) -> None:
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.setenv("MPP_METHODS", "tempo,paypal")
+    monkeypatch.setenv(
+        "MPP_DESTINATION_ADDRESS", "0xabc0000000000000000000000000000000000001"
+    )
+    with pytest.raises(RuntimeError, match="MPP_METHODS"):
+        Config.from_env()
+
+
+def test_mpp_config_default_methods_is_tempo_only(monkeypatch) -> None:
+    """Backward-compat: PAYWALL=mpp without MPP_METHODS keeps the
+    pre-multi-method behavior (tempo-only)."""
+    monkeypatch.setenv("PAYWALL", "mpp")
+    monkeypatch.setenv(
+        "MPP_DESTINATION_ADDRESS", "0xabc0000000000000000000000000000000000001"
+    )
+    monkeypatch.setenv("MPP_NETWORK", "tempo-testnet")
+    monkeypatch.delenv("MPP_METHODS", raising=False)
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    cfg = Config.from_env()
+    assert cfg.mpp_methods == ["tempo"]
+    assert cfg.stripe_secret_key is None
+
+
+def test_mpp_gate_stripe_only_rejects_unpaid(fake_mcp_app: Starlette) -> None:
+    """Stripe-only gate: unpaid tools/call returns 402 whose
+    WWW-Authenticate header advertises method=stripe."""
+
+    @dataclass
+    class _StripeChallenge:
+        id: str = "ch_stripe_fake"
+        realm: str = "plaid-mcp"
+        method: str = "stripe"
+        intent: str = "charge"
+
+        def to_www_authenticate(self, realm: str) -> str:  # noqa: ARG002
+            return 'Payment realm="plaid-mcp", method="stripe", intent="charge"'
+
+    stripe_handler = _FakeMppHandler(result=_StripeChallenge())
+    gate = MppGate(
+        methods=["stripe"],
+        stripe_secret_key="sk_test_abc123",
+        prices=DEFAULT_PRICES,
+        mpp_handlers={"stripe": stripe_handler},
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "summarize_debt_tool"},
+    }
+    response = client.post("/mcp", json=rpc)
+    assert response.status_code == 402
+    www_auth = response.headers.get("www-authenticate", "")
+    assert 'method="stripe"' in www_auth
+    # Body's methods list carries a single stripe entry.
+    body = response.json()
+    methods = body["error"]["data"]["methods"]
+    assert len(methods) == 1
+    assert methods[0]["method"] == "stripe"
+
+
+def test_mpp_gate_with_tempo_and_stripe_advertises_both(
+    fake_mcp_app: Starlette,
+) -> None:
+    """Both rails configured → 402 advertises both methods. The exact
+    WWW-Authenticate format is pympp's; we assert both ``method="stripe"``
+    and ``method="tempo"`` show up in the combined header list."""
+
+    @dataclass
+    class _TempoChallenge:
+        id: str = "ch_tempo"
+        realm: str = "plaid-mcp"
+        method: str = "tempo"
+        intent: str = "charge"
+
+        def to_www_authenticate(self, realm: str) -> str:  # noqa: ARG002
+            return 'Payment realm="plaid-mcp", method="tempo", intent="charge"'
+
+    @dataclass
+    class _StripeChallenge:
+        id: str = "ch_stripe"
+        realm: str = "plaid-mcp"
+        method: str = "stripe"
+        intent: str = "charge"
+
+        def to_www_authenticate(self, realm: str) -> str:  # noqa: ARG002
+            return 'Payment realm="plaid-mcp", method="stripe", intent="charge"'
+
+    tempo_handler = _FakeMppHandler(result=_TempoChallenge())
+    stripe_handler = _FakeMppHandler(result=_StripeChallenge())
+    gate = MppGate(
+        methods=["tempo", "stripe"],
+        destination_address="0xabc0000000000000000000000000000000000001",
+        network="tempo-testnet",
+        stripe_secret_key="sk_test_abc123",
+        prices=DEFAULT_PRICES,
+        mpp_handlers={"tempo": tempo_handler, "stripe": stripe_handler},
+    )
+    client = TestClient(gate.asgi_middleware(fake_mcp_app))
+    rpc = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": "get_balances_tool"},
+    }
+    response = client.post("/mcp", json=rpc)
+    assert response.status_code == 402
+
+    # HTTP allows repeating WWW-Authenticate; httpx flattens them via
+    # comma-join. Assert both method tokens are present.
+    www_auth = response.headers.get("www-authenticate", "")
+    assert 'method="tempo"' in www_auth
+    assert 'method="stripe"' in www_auth
+
+    # Structured body also lists both methods in declared order.
+    body = response.json()
+    methods = [m["method"] for m in body["error"]["data"]["methods"]]
+    assert methods == ["tempo", "stripe"]
+
+    # Both handlers were asked to mint a challenge.
+    assert len(tempo_handler.charge_calls) == 1
+    assert len(stripe_handler.charge_calls) == 1
+
+
+def test_mpp_gate_stripe_charge_passes_secret_key() -> None:
+    """The Stripe handler is constructed with ``stripe_secret_key``
+    threading all the way into pympp's ``ChargeIntent``. We don't drive
+    the ASGI path here — we just verify the secret reached the handler
+    factory.
+    """
+    # Mock pympp imports so the gate can build real Mpp wrappers without
+    # the 'mpp' extra cooperating with our fake intents. Use the real
+    # Mpp class but with a stub intent — simplest way to verify flow.
+    gate = MppGate(
+        methods=["stripe"],
+        stripe_secret_key="sk_test_secret_xyz",
+        stripe_payment_method_types=["card"],
+        stripe_currency="usd",
+        prices=DEFAULT_PRICES,
+    )
+    # The Stripe handler was built lazily. It's a real mpp.server.Mpp;
+    # pull the underlying method and confirm the intent carries our key.
+    stripe_mpp = gate._mpps["stripe"]
+    # mpp.server.Mpp stores the method under .method
+    method = stripe_mpp.method
+    intent = method.intents["charge"]
+    # pympp's StripeChargeIntent exposes the secret via its client;
+    # either the raw .secret_key attr or inside the stripe client.
+    found = False
+    for candidate in (
+        getattr(intent, "secret_key", None),
+        getattr(intent, "_secret_key", None),
+        getattr(getattr(intent, "client", None), "api_key", None),
+        getattr(getattr(intent, "client", None), "secret_key", None),
+    ):
+        if candidate == "sk_test_secret_xyz":
+            found = True
+            break
+    assert found, (
+        f"stripe_secret_key did not flow into pympp's ChargeIntent; "
+        f"intent attrs: {dir(intent)}"
+    )
+
+
+def test_mpp_gate_requires_destination_when_tempo_in_methods() -> None:
+    """Construction-time guard: tempo rail needs a destination address."""
+    with pytest.raises(ValueError, match="destination_address"):
+        MppGate(
+            methods=["tempo"],
+            prices=DEFAULT_PRICES,
+            mpp_handlers={"tempo": _FakeMppHandler()},
+        )
+
+
+def test_mpp_gate_requires_stripe_secret_when_stripe_in_methods() -> None:
+    with pytest.raises(ValueError, match="stripe_secret_key"):
+        MppGate(
+            methods=["stripe"],
+            prices=DEFAULT_PRICES,
+            mpp_handlers={"stripe": _FakeMppHandler()},
+        )
+
+
+def test_mpp_gate_rejects_empty_methods_list() -> None:
+    with pytest.raises(ValueError, match="methods"):
+        MppGate(
+            methods=[],
+            destination_address="0xabc0000000000000000000000000000000000001",
+            prices=DEFAULT_PRICES,
+            mpp_handlers={},
+        )
+
+
+def test_mpp_gate_rejects_unknown_method_name() -> None:
+    with pytest.raises(ValueError, match="unknown method"):
+        MppGate(
+            methods=["paypal"],
+            destination_address="0xabc0000000000000000000000000000000000001",
+            prices=DEFAULT_PRICES,
+            mpp_handlers={"paypal": _FakeMppHandler()},
+        )
+
+
+def test_build_gate_mpp_stripe_only(monkeypatch) -> None:
+    """Factory returns an MppGate when MPP_METHODS=stripe and no
+    tempo destination is provided. This test uses real pympp (installed
+    via the `mpp` extra in dev) so it verifies the full config wiring."""
+    gate = build_gate(
+        _base_config(
+            paywall="mpp",
+            mpp_methods=["stripe"],
+            mpp_destination_address=None,
+            stripe_secret_key="sk_test_xxx",
+            stripe_payment_method_types=["card"],
+            stripe_currency="usd",
+        )
+    )
+    assert isinstance(gate, MppGate)
+    assert gate.methods == ["stripe"]
+
+
+def test_build_gate_mpp_stripe_without_secret_raises() -> None:
+    with pytest.raises(RuntimeError, match="stripe_secret_key"):
+        build_gate(
+            _base_config(
+                paywall="mpp",
+                mpp_methods=["stripe"],
+                mpp_destination_address=None,
+                stripe_secret_key=None,
+            )
+        )
+
+
+# ----------------------------------------------------------------------
 # Online-optional: live Tempo testnet (skipped without key)
 # ----------------------------------------------------------------------
 

@@ -67,14 +67,23 @@ class Config:
     # X402Gate bound to a mainnet network — guardrail against typos.
     x402_allow_mainnet: bool = False
 
-    # MPP (Machine Payments Protocol via Tempo stablecoin). Same shape
-    # as the x402 block above: destination address + network, with a
-    # hard mainnet opt-in so a typo can't silently send real USDC.
+    # MPP (Machine Payments Protocol). Multi-method rail: operators can
+    # advertise any combination of Tempo stablecoin + Stripe cards; when
+    # both are configured, the 402 challenge carries both and the client
+    # picks one when signing. Same mainnet opt-in as the x402 block above.
+    mpp_methods: list[str] = field(default_factory=lambda: ["tempo"])
     mpp_destination_address: str | None = None
     mpp_network: str = "tempo-testnet"
     mpp_allow_mainnet: bool = False
     mpp_secret_key: str | None = None
     mpp_rpc_url: str | None = None
+
+    # Stripe card-rail config — only consulted when "stripe" is in
+    # mpp_methods. STRIPE_SECRET_KEY is the merchant's Stripe API secret;
+    # pympp's ChargeIntent uses it to create PaymentIntents server-side.
+    stripe_secret_key: str | None = None
+    stripe_payment_method_types: list[str] = field(default_factory=lambda: ["card"])
+    stripe_currency: str | None = "usd"
 
     @property
     def host(self) -> str:
@@ -141,27 +150,73 @@ class Config:
         mpp_secret_key = os.getenv("MPP_SECRET_KEY", "").strip() or None
         mpp_rpc_url = os.getenv("MPP_RPC_URL", "").strip() or None
 
+        # MPP_METHODS — which rails to advertise in the 402 challenge.
+        # Default keeps backward-compat: unset means "tempo only", same
+        # behavior as the single-method gate that shipped originally.
+        mpp_methods_raw = os.getenv("MPP_METHODS", "").strip()
+        if mpp_methods_raw:
+            mpp_methods = [m.strip().lower() for m in mpp_methods_raw.split(",") if m.strip()]
+        else:
+            mpp_methods = ["tempo"]
+        _VALID_MPP_METHODS = {"tempo", "stripe"}
+        for m in mpp_methods:
+            if m not in _VALID_MPP_METHODS:
+                raise RuntimeError(
+                    f"MPP_METHODS contains unknown method {m!r}; expected a comma-"
+                    f"separated subset of {sorted(_VALID_MPP_METHODS)}."
+                )
+        if not mpp_methods:
+            raise RuntimeError(
+                "MPP_METHODS must be non-empty when PAYWALL=mpp. "
+                "Use MPP_METHODS=tempo, MPP_METHODS=stripe, or MPP_METHODS=tempo,stripe."
+            )
+
+        stripe_secret_key = os.getenv("STRIPE_SECRET_KEY", "").strip() or None
+        stripe_pmt_raw = os.getenv("STRIPE_PAYMENT_METHOD_TYPES", "").strip()
+        if stripe_pmt_raw:
+            stripe_payment_method_types = [
+                p.strip() for p in stripe_pmt_raw.split(",") if p.strip()
+            ]
+        else:
+            stripe_payment_method_types = ["card"]
+        stripe_currency = (
+            os.getenv("STRIPE_CURRENCY", "usd").strip().lower() or "usd"
+        )
+
         if paywall == "x402" and not x402_receiving_address:
             raise RuntimeError(
                 "PAYWALL=x402 requires X402_RECEIVING_ADDRESS to be set to the "
                 "Base wallet address that should receive USDC payments."
             )
-        if paywall == "mpp" and not mpp_destination_address:
-            raise RuntimeError(
-                "PAYWALL=mpp requires MPP_DESTINATION_ADDRESS to be set to the "
-                "Tempo wallet address that should receive USDC payments."
-            )
-        # Defer the "what counts as mainnet" decision to the gate module
-        # so both places agree on the alias table.
         if paywall == "mpp":
-            from .payments.mpp import is_mainnet as _mpp_is_mainnet
-
-            if _mpp_is_mainnet(mpp_network) and not mpp_allow_mainnet:
+            # Tempo is only required when it's an advertised method —
+            # a Stripe-only operator shouldn't need a Tempo wallet.
+            if "tempo" in mpp_methods and not mpp_destination_address:
                 raise RuntimeError(
-                    f"MPP_NETWORK={mpp_network!r} resolves to a mainnet chain "
-                    "but MPP_ALLOW_MAINNET is not set. Set MPP_ALLOW_MAINNET=1 "
-                    "to confirm you want to accept real USDC on Tempo."
+                    "PAYWALL=mpp with 'tempo' in MPP_METHODS requires "
+                    "MPP_DESTINATION_ADDRESS to be set to the Tempo wallet "
+                    "address that should receive USDC payments."
                 )
+            if "stripe" in mpp_methods and not stripe_secret_key:
+                raise RuntimeError(
+                    "PAYWALL=mpp with 'stripe' in MPP_METHODS requires "
+                    "STRIPE_SECRET_KEY to be set to your Stripe API secret "
+                    "(sk_live_... or sk_test_...). Get one at "
+                    "https://dashboard.stripe.com/apikeys."
+                )
+            # Defer the "what counts as mainnet" decision to the gate
+            # module so both places agree on the alias table. Only
+            # applies when tempo is actually advertised.
+            if "tempo" in mpp_methods:
+                from .payments.mpp import is_mainnet as _mpp_is_mainnet
+
+                if _mpp_is_mainnet(mpp_network) and not mpp_allow_mainnet:
+                    raise RuntimeError(
+                        f"MPP_NETWORK={mpp_network!r} resolves to a mainnet "
+                        "chain but MPP_ALLOW_MAINNET is not set. Set "
+                        "MPP_ALLOW_MAINNET=1 to confirm you want to accept "
+                        "real USDC on Tempo."
+                    )
         if paywall not in {"none", "x402", "mpp"}:
             raise RuntimeError(
                 f"PAYWALL must be 'none', 'x402', or 'mpp' (got {paywall!r})."
@@ -188,11 +243,15 @@ class Config:
             x402_network=x402_network,
             x402_facilitator_url=x402_facilitator_url,
             x402_allow_mainnet=x402_allow_mainnet,
+            mpp_methods=mpp_methods,
             mpp_destination_address=mpp_destination_address,
             mpp_network=mpp_network,
             mpp_allow_mainnet=mpp_allow_mainnet,
             mpp_secret_key=mpp_secret_key,
             mpp_rpc_url=mpp_rpc_url,
+            stripe_secret_key=stripe_secret_key,
+            stripe_payment_method_types=stripe_payment_method_types,
+            stripe_currency=stripe_currency,
         )
 
     def as_products(self):  # -> list[plaid.model.products.Products]

@@ -1,18 +1,27 @@
-"""MPP (Machine Payments Protocol) payment gate — Tempo stablecoin rail.
+"""MPP (Machine Payments Protocol) payment gate — multi-method rail.
 
 A parallel payment rail to ``X402Gate`` that speaks MPP's HTTP scheme
 (``Authorization: Payment <credential>`` + ``WWW-Authenticate: Payment
 <challenge>`` + ``Payment-Receipt: <receipt>``) instead of x402's
-``X-PAYMENT`` / ``X-Payment-Response`` pair. Settlement is pure wallet-
-to-wallet USDC on the Tempo L2 — no Stripe merchant account, no CDP
-auth. Operators select the rail via ``PAYWALL=mpp`` in config.
+``X-PAYMENT`` / ``X-Payment-Response`` pair. Operators pick any
+combination of two rails:
+
+  - ``tempo``  — wallet-to-wallet USDC on the Tempo L2 (no Stripe,
+                 no Coinbase CDP auth; crypto-native only).
+  - ``stripe`` — Stripe PaymentIntents via pympp's Stripe method
+                 (any payment_method_types the operator's Stripe
+                 account supports: card, apple_pay, etc.).
+
+When more than one method is configured, the 402 challenge advertises
+*all* of them (each method emits its own ``WWW-Authenticate: Payment
+...`` header) and the client picks one when signing. The incoming
+``Authorization: Payment <credential>`` is dispatched back to the right
+``Mpp`` instance using ``credential.challenge.method``.
 
 Structural mirror of ``X402Gate``: single ASGI middleware that peeks
 JSON-RPC on POST ``/mcp``, gates ``tools/call``, passes through
-``tools/list``. We delegate the payment mechanics to pympp's
-``mpp.server.Mpp`` handler, which wraps the ``verify_or_challenge``
-state machine and the Tempo ``ChargeIntent`` verifier. The gate keeps
-the same "discovery free, invocation paid" posture.
+``tools/list``. The gate keeps the same "discovery free, invocation
+paid" posture.
 
 Why this can't be pympp's ``@pay`` decorator: FastMCP is a single POST
 endpoint and payment metadata is tool-specific, so we need to peek the
@@ -21,13 +30,30 @@ before issuing a challenge. The ``@pay`` decorator wires to a specific
 endpoint with a static request dict. We call ``Mpp.charge()`` directly
 per request instead.
 
+Multi-method workaround: pympp 0.6's ``mpp.server.Mpp`` constructor
+accepts a single ``method=`` argument — there is no native multi-method
+Mpp today. We therefore build one ``Mpp`` instance per configured rail
+(sharing a single ``secret_key`` so HMAC-bound challenges remain valid
+regardless of which handler issued them) and route each request by:
+
+  - unpaid / malformed Authorization header → call every ``Mpp.charge``
+    with ``authorization=None`` and emit one ``WWW-Authenticate`` header
+    per method (HTTP allows multiple values);
+  - valid-shaped Authorization → parse ``credential.challenge.method``
+    and dispatch to the matching handler only.
+
+When pympp ships a native multi-method ``Mpp`` we'll collapse this back
+down to a single instance; the shared ``secret_key`` is the invariant
+that keeps that upgrade straightforward.
+
 Settlement lifecycle::
 
     1. Peek body → decide if this is a paid tools/call
-    2. No Authorization header        → 402 + WWW-Authenticate
-                                         + JSON-RPC error (-32042)
-    3. Malformed credential           → 402, pympp regenerates challenge
-    4. verify_or_challenge rejects    → 402, fresh challenge
+    2. No Authorization header        → 402 + WWW-Authenticate (one
+                                         per configured method) + a
+                                         JSON-RPC error (-32042)
+    3. Malformed credential           → 402, fresh challenges
+    4. verify_or_challenge rejects    → 402, fresh challenges
     5. Credential OK (returns (cred, receipt)) → forward request,
        capture upstream response, attach Payment-Receipt header.
 
@@ -139,8 +165,8 @@ class MppGate:
 
     Structurally identical to :class:`~plaid_mcp.payments.x402.X402Gate`
     but speaks the MPP wire format (``Authorization: Payment`` +
-    ``WWW-Authenticate: Payment`` + ``Payment-Receipt``) and settles
-    on Tempo instead of Base.
+    ``WWW-Authenticate: Payment`` + ``Payment-Receipt``) and can settle
+    across multiple rails (Tempo stablecoin, Stripe cards, or both).
     """
 
     name = "mpp"
@@ -148,7 +174,7 @@ class MppGate:
     def __init__(
         self,
         *,
-        destination_address: str,
+        destination_address: str | None = None,
         network: str = "tempo-testnet",
         prices: PriceTable,
         mcp_path: str = DEFAULT_MCP_PATH,
@@ -156,30 +182,85 @@ class MppGate:
         rpc_url: str | None = None,
         realm: str = "plaid-mcp",
         currency: str | None = None,
+        methods: list[str] | None = None,
+        stripe_secret_key: str | None = None,
+        stripe_payment_method_types: list[str] | None = None,
+        stripe_currency: str | None = None,
         mpp_handler: Any | None = None,
+        mpp_handlers: dict[str, Any] | None = None,
     ) -> None:
         """Build a gate.
 
         Args:
-            destination_address: Tempo wallet that receives USDC.
+            destination_address: Tempo wallet that receives USDC. Required
+                when ``"tempo"`` appears in ``methods``.
             network: Friendly alias (``tempo-testnet`` /
-                ``tempo-mainnet``) or raw chain ID.
+                ``tempo-mainnet``) or raw chain ID. Ignored when ``tempo``
+                isn't in ``methods``.
             prices: Per-tool ``PriceTable`` keyed by MCP tool name.
             mcp_path: HTTP path where the MCP transport is mounted.
             secret_key: HMAC secret for stateless challenge verification.
                 Auto-generated if unset; override via ``MPP_SECRET_KEY``
                 when you need restarts to leave outstanding challenges
-                valid.
+                valid. Shared across all ``Mpp`` instances.
             rpc_url: Override Tempo RPC endpoint. Defaults to pympp's
                 chain-ID-derived URL.
             realm: Realm string sent in ``WWW-Authenticate`` challenges.
-            currency: TIP-20 token contract. Defaults to pympp's
+            currency: Tempo TIP-20 token contract. Defaults to pympp's
                 chain-appropriate value (USDC on mainnet, pathUSD on
                 testnet).
-            mpp_handler: Dependency-injection seam for tests. When None,
-                build a real ``mpp.server.Mpp`` bound to Tempo.
+            methods: List of MPP method names to advertise. Defaults to
+                ``["tempo"]`` for backward compatibility with the
+                single-rail constructor. Accepted values: ``"tempo"``,
+                ``"stripe"``.
+            stripe_secret_key: Stripe API secret (``sk_live_...`` or
+                ``sk_test_...``). Required when ``"stripe"`` in
+                ``methods``.
+            stripe_payment_method_types: Stripe PaymentIntent
+                ``payment_method_types``. Defaults to ``["card"]``.
+            stripe_currency: Stripe ISO 4217 currency code. Defaults to
+                ``"usd"``.
+            mpp_handler: Backward-compat single-handler DI seam. Treated
+                as the Tempo handler when supplied — kept to avoid
+                breaking the pre-multi-method test fixtures.
+            mpp_handlers: Per-method DI seam: ``{"tempo": ..., "stripe":
+                ...}``. When None, real ``Mpp`` instances are built for
+                each entry in ``methods``.
         """
-        chain_id = _normalize_network(network)
+        # Normalize + validate the method list up front so misconfigured
+        # callers see a clear error before we try to import pympp.
+        # ``None`` → default to ``["tempo"]`` for backward-compat with the
+        # single-rail constructor; an explicit empty list is a bug.
+        if methods is None:
+            raw_methods: list[str] = ["tempo"]
+        else:
+            raw_methods = list(methods)
+        if not raw_methods:
+            raise ValueError("MppGate: 'methods' must be a non-empty list.")
+        requested = [m.strip().lower() for m in raw_methods if m and m.strip()]
+        if not requested:
+            raise ValueError("MppGate: 'methods' must be a non-empty list.")
+        unknown = [m for m in requested if m not in {"tempo", "stripe"}]
+        if unknown:
+            raise ValueError(
+                f"MppGate: unknown method(s) {unknown!r}; expected 'tempo' or 'stripe'."
+            )
+
+        # Tempo bookkeeping — only materialized when tempo is requested.
+        if "tempo" in requested:
+            if not destination_address:
+                raise ValueError(
+                    "MppGate: destination_address is required when 'tempo' "
+                    "is in methods."
+                )
+            chain_id = _normalize_network(network)
+        else:
+            chain_id = 0  # unused; keeps the attribute typed as int.
+
+        if "stripe" in requested and not stripe_secret_key:
+            raise ValueError(
+                "MppGate: stripe_secret_key is required when 'stripe' is in methods."
+            )
 
         self.destination_address = destination_address
         self.chain_id = chain_id
@@ -189,6 +270,10 @@ class MppGate:
         self.realm = realm
         self.rpc_url = rpc_url
         self.currency = currency
+        self.methods = requested
+        self.stripe_secret_key = stripe_secret_key
+        self.stripe_payment_method_types = list(stripe_payment_method_types or ["card"])
+        self.stripe_currency = stripe_currency or "usd"
         # When an operator doesn't supply a secret, synthesize one so
         # challenges are HMAC-bound but volatile across restarts. Matches
         # pympp's own ``detect_secret_key`` default behavior from an
@@ -196,14 +281,44 @@ class MppGate:
         # restarts pass a key via the constructor (factory wires env).
         self.secret_key = secret_key or secrets.token_urlsafe(32)
 
-        self._mpp = mpp_handler if mpp_handler is not None else self._build_mpp_handler()
+        # Resolve the per-method handler dict. Priority:
+        #   1. explicit ``mpp_handlers`` dict (tests)
+        #   2. legacy ``mpp_handler=`` wired in as the tempo handler
+        #      (tests that predate multi-method)
+        #   3. build real pympp ``Mpp`` instances per requested method.
+        if mpp_handlers is not None:
+            self._mpps: dict[str, Any] = dict(mpp_handlers)
+        elif mpp_handler is not None:
+            # Backward compat: a single injected handler is treated as
+            # the tempo handler. This keeps pre-multi-method fixtures
+            # working without churn.
+            self._mpps = {requested[0]: mpp_handler}
+        else:
+            self._mpps = self._build_mpp_handlers()
+
+    # ------------------------------------------------------------------
+    # Backward-compat alias — some tests and external code still read
+    # ``gate._mpp``. We expose the first configured handler under that
+    # attribute so the single-method accessor keeps working.
+    # ------------------------------------------------------------------
+
+    @property
+    def _mpp(self) -> Any:
+        """First configured handler — kept for single-method compat callers."""
+        # iterate ``self.methods`` so the order matches the requested
+        # configuration (operator-controlled priority).
+        for name in self.methods:
+            if name in self._mpps:
+                return self._mpps[name]
+        # Fallback: any handler we have. Shouldn't normally fire.
+        return next(iter(self._mpps.values()))
 
     # ------------------------------------------------------------------
     # pympp handler wiring
     # ------------------------------------------------------------------
 
-    def _build_mpp_handler(self) -> Any:
-        """Construct the pympp ``Mpp`` handler bound to Tempo.
+    def _build_mpp_handlers(self) -> dict[str, Any]:
+        """Construct one pympp ``Mpp`` per requested method.
 
         Imported lazily so the module is importable on a machine without
         the ``[mpp]`` extra installed. Operators who set ``PAYWALL=mpp``
@@ -211,7 +326,6 @@ class MppGate:
         construction time instead of a silent misconfiguration.
         """
         try:
-            from mpp.methods.tempo import ChargeIntent, tempo
             from mpp.server import Mpp
         except ImportError as exc:  # pragma: no cover — structural import guard
             raise RuntimeError(
@@ -220,18 +334,59 @@ class MppGate:
                 "(or pip install 'plaid-mcp[mpp]')."
             ) from exc
 
-        method = tempo(
-            chain_id=self.chain_id,
-            rpc_url=self.rpc_url,
-            recipient=self.destination_address,
-            currency=self.currency,
-            intents={"charge": ChargeIntent(chain_id=self.chain_id, rpc_url=self.rpc_url)},
-        )
-        return Mpp(
-            method=method,
-            realm=self.realm,
-            secret_key=self.secret_key,
-        )
+        handlers: dict[str, Any] = {}
+        if "tempo" in self.methods:
+            try:
+                from mpp.methods.tempo import ChargeIntent as TempoChargeIntent
+                from mpp.methods.tempo import tempo as tempo_method
+            except ImportError as exc:  # pragma: no cover
+                raise RuntimeError(
+                    "PAYWALL=mpp with tempo method requires the 'tempo' extra "
+                    "on pympp. Install: uv sync --extra mpp."
+                ) from exc
+
+            tempo = tempo_method(
+                chain_id=self.chain_id,
+                rpc_url=self.rpc_url,
+                recipient=self.destination_address,
+                currency=self.currency,
+                intents={
+                    "charge": TempoChargeIntent(
+                        chain_id=self.chain_id, rpc_url=self.rpc_url
+                    )
+                },
+            )
+            handlers["tempo"] = Mpp(
+                method=tempo, realm=self.realm, secret_key=self.secret_key
+            )
+
+        if "stripe" in self.methods:
+            try:
+                from mpp.methods.stripe import ChargeIntent as StripeChargeIntent
+                from mpp.methods.stripe import stripe as stripe_method
+            except ImportError as exc:  # pragma: no cover
+                raise RuntimeError(
+                    "PAYWALL=mpp with stripe method requires the 'stripe' extra "
+                    "on pympp. Install: uv sync --extra mpp."
+                ) from exc
+
+            stripe = stripe_method(
+                intents={
+                    "charge": StripeChargeIntent(secret_key=self.stripe_secret_key)
+                },
+                currency=self.stripe_currency,
+                payment_method_types=self.stripe_payment_method_types,
+                # pympp requires a ``recipient`` string even though Stripe
+                # settles into the merchant's own account (identified by
+                # the secret key). We echo a marker so the challenge
+                # serializes; it isn't used by Stripe itself.
+                recipient=self.destination_address or "stripe-account",
+            )
+            handlers["stripe"] = Mpp(
+                method=stripe, realm=self.realm, secret_key=self.secret_key
+            )
+
+        return handlers
 
     # ------------------------------------------------------------------
     # ASGI entrypoint
@@ -266,28 +421,45 @@ class MppGate:
             tool = decision.tool_name or "unknown"
             amount_str = _cents_to_amount(self.prices.for_tool(tool))
 
+            target_handler = self._route_authorization(authorization)
+            if target_handler is None:
+                # No credential (or unparseable): collect a fresh challenge
+                # from every configured method and return them together.
+                challenges = await self._gather_challenges(amount_str, tool)
+                await self._send_402(send, decision, challenges)
+                return
+
+            # Credential parsed and routed to a specific handler. Let
+            # that handler verify.
             try:
-                result = await self._mpp.charge(
+                result = await target_handler.charge(
                     authorization=authorization,
                     amount=amount_str,
                     extra={"tool": tool},
                 )
             except Exception as exc:  # noqa: BLE001 — any pympp error = treat as challenge
                 # pympp raises on malformed credentials / verification
-                # failures; the cleanest recovery is to re-issue a fresh
-                # challenge via the "no authorization" path rather than
-                # surfacing a 5xx. Log for operator visibility.
+                # failures; the cleanest recovery is to re-issue fresh
+                # challenges (across all methods) rather than surfacing a
+                # 5xx. Log for operator visibility.
                 logger.warning("mpp charge() errored, re-challenging: %s", exc)
-                result = await self._mpp.charge(
-                    authorization=None,
-                    amount=amount_str,
-                    extra={"tool": tool},
-                )
+                challenges = await self._gather_challenges(amount_str, tool)
+                await self._send_402(send, decision, challenges)
+                return
 
             # pympp returns a Challenge instance when payment is missing
             # or invalid, and a (Credential, Receipt) tuple when verified.
             if _is_challenge(result):
-                await self._send_402(send, decision, result)
+                # Even when a specific handler rejects, it's cheapest to
+                # also offer the other configured methods as alternatives.
+                # Start from this rejection and top up with siblings.
+                challenges = [result]
+                challenges.extend(
+                    await self._gather_challenges(
+                        amount_str, tool, skip={result.method}
+                    )
+                )
+                await self._send_402(send, decision, challenges)
                 return
 
             credential, receipt = result
@@ -298,20 +470,113 @@ class MppGate:
         return _wrapped
 
     # ------------------------------------------------------------------
+    # Multi-method dispatch helpers
+    # ------------------------------------------------------------------
+
+    def _route_authorization(self, authorization: str | None) -> Any | None:
+        """Pick the ``Mpp`` instance responsible for ``authorization``.
+
+        Returns ``None`` when the header is missing or un-parseable — the
+        caller then emits a fresh challenge instead of trying to verify.
+        When exactly one method is configured we skip parsing and return
+        that handler directly, so a malformed-but-present Authorization
+        header still gets a chance at pympp's own re-challenge path
+        (preserving backward-compatible behavior).
+        """
+        if not authorization:
+            return None
+        if len(self._mpps) == 1:
+            # Single-method deployments: delegate to the one handler we
+            # have; pympp re-challenges on parse failure.
+            return next(iter(self._mpps.values()))
+
+        try:
+            from mpp import Credential
+        except ImportError:  # pragma: no cover — shouldn't hit here
+            return None
+        try:
+            cred = Credential.from_authorization(authorization)
+            method = cred.challenge.method
+        except Exception:  # noqa: BLE001 — malformed header = no handler
+            return None
+        return self._mpps.get(method)
+
+    async def _gather_challenges(
+        self, amount_str: str, tool: str, *, skip: set[str] | None = None
+    ) -> list[Any]:
+        """Request a fresh challenge from each configured handler.
+
+        Keeps the ordering stable (iterates ``self.methods``) so the 402
+        always lists methods in the operator-declared priority. ``skip``
+        lets the caller drop methods that already produced a challenge
+        this request — avoids sending duplicate ``WWW-Authenticate``
+        headers for the same method.
+        """
+        skip = skip or set()
+        out: list[Any] = []
+        for name in self.methods:
+            if name in skip:
+                continue
+            handler = self._mpps.get(name)
+            if handler is None:
+                continue
+            try:
+                result = await handler.charge(
+                    authorization=None, amount=amount_str, extra={"tool": tool}
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("mpp %s challenge mint errored: %s", name, exc)
+                continue
+            if _is_challenge(result):
+                out.append(result)
+        return out
+
+    # ------------------------------------------------------------------
     # 402 response
     # ------------------------------------------------------------------
 
-    async def _send_402(self, send, decision: _PaymentDecision, challenge: Any) -> None:
-        """Emit a 402 with ``WWW-Authenticate`` and a JSON-RPC error body.
+    async def _send_402(
+        self, send, decision: _PaymentDecision, challenges: Any
+    ) -> None:
+        """Emit a 402 with one ``WWW-Authenticate`` per challenge.
 
         Body shape: ``{"jsonrpc": "2.0", "id": <rpc_id>, "error":
         {"code": -32042, "message": "Payment Required", "data":
-        {"httpStatus": 402, ...}}}``. Matches
+        {"httpStatus": 402, "methods": [...]}}}``. Matches
         draft-payment-transport-mcp-00 so MCP-aware clients can dispatch
         on the ``code`` field; HTTP-aware clients can dispatch on the
-        status + ``WWW-Authenticate`` header.
+        status + ``WWW-Authenticate`` headers.
+
+        Accepts either a single challenge (backward compat) or a list —
+        this keeps the pre-multi-method test fixtures working while
+        letting the new path emit multiple challenges cleanly.
         """
-        www_auth = challenge.to_www_authenticate(self.realm)
+        if isinstance(challenges, list):
+            chs = challenges
+        else:
+            chs = [challenges]
+
+        headers: list[tuple[bytes, bytes]] = [
+            (b"content-type", b"application/json"),
+            (b"cache-control", b"no-store"),
+            (b"x-payment-required", b"1"),
+        ]
+        methods_meta: list[dict[str, Any]] = []
+        for challenge in chs:
+            www_auth = challenge.to_www_authenticate(self.realm)
+            # HTTP allows repeating ``WWW-Authenticate`` to advertise
+            # multiple auth schemes (RFC 9110 §11.6.1). Emit one header
+            # per method rather than coalescing; keeps pympp's per-method
+            # challenge strings intact and lets the client pick.
+            headers.append((_WWW_AUTH_HEADER, www_auth.encode("utf-8")))
+            methods_meta.append(
+                {
+                    "method": challenge.method,
+                    "intent": challenge.intent,
+                    "challengeId": challenge.id,
+                }
+            )
+
         body_obj = {
             "jsonrpc": "2.0",
             "id": decision.rpc_id,
@@ -321,24 +586,29 @@ class MppGate:
                 "data": {
                     "httpStatus": 402,
                     "realm": self.realm,
-                    "method": challenge.method,
-                    "intent": challenge.intent,
-                    "challengeId": challenge.id,
+                    "methods": methods_meta,
+                    # Back-compat single-method fields: downstream clients
+                    # that only read the first method still work.
+                    **(
+                        {
+                            "method": methods_meta[0]["method"],
+                            "intent": methods_meta[0]["intent"],
+                            "challengeId": methods_meta[0]["challengeId"],
+                        }
+                        if methods_meta
+                        else {}
+                    ),
                 },
             },
         }
         body = json.dumps(body_obj, separators=(",", ":")).encode("utf-8")
+        headers.append((b"content-length", str(len(body)).encode()))
+
         await send(
             {
                 "type": "http.response.start",
                 "status": 402,
-                "headers": [
-                    (b"content-type", b"application/json"),
-                    (_WWW_AUTH_HEADER, www_auth.encode("utf-8")),
-                    (b"cache-control", b"no-store"),
-                    (b"x-payment-required", b"1"),
-                    (b"content-length", str(len(body)).encode()),
-                ],
+                "headers": headers,
             }
         )
         await send({"type": "http.response.body", "body": body, "more_body": False})

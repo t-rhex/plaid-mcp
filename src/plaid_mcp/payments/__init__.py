@@ -65,15 +65,29 @@ def build_gate(config: Config) -> PaymentGate:
     if mode == "mpp":
         # Same belt-and-braces assertion as x402 above — Config.from_env
         # already enforces this, but direct Config(...) construction in
-        # tests can skip it.
-        if not config.mpp_destination_address:
+        # tests can skip it. Only required when tempo is an advertised
+        # method; a Stripe-only deployment doesn't need a Tempo wallet.
+        methods = list(config.mpp_methods or ["tempo"])
+        if "tempo" in methods and not config.mpp_destination_address:
             raise RuntimeError(
-                "PAYWALL=mpp requires mpp_destination_address to be set (Tempo "
-                "wallet that receives USDC payments)."
+                "PAYWALL=mpp with 'tempo' in MPP_METHODS requires "
+                "mpp_destination_address to be set (Tempo wallet that "
+                "receives USDC payments)."
+            )
+        if "stripe" in methods and not config.stripe_secret_key:
+            raise RuntimeError(
+                "PAYWALL=mpp with 'stripe' in MPP_METHODS requires "
+                "stripe_secret_key to be set (Stripe API secret, "
+                "sk_live_... or sk_test_...)."
             )
 
-        # Mainnet opt-in guard — mirrors the x402 policy exactly.
-        if _mpp_is_mainnet(config.mpp_network) and not config.mpp_allow_mainnet:
+        # Mainnet opt-in guard — mirrors the x402 policy exactly. Only
+        # meaningful when tempo is actually advertised.
+        if (
+            "tempo" in methods
+            and _mpp_is_mainnet(config.mpp_network)
+            and not config.mpp_allow_mainnet
+        ):
             raise RuntimeError(
                 f"MPP_NETWORK={config.mpp_network!r} resolves to a mainnet "
                 "chain but MPP_ALLOW_MAINNET is not set. Set "
@@ -87,6 +101,10 @@ def build_gate(config: Config) -> PaymentGate:
             secret_key=config.mpp_secret_key,
             rpc_url=config.mpp_rpc_url,
             prices=DEFAULT_PRICES,
+            methods=methods,
+            stripe_secret_key=config.stripe_secret_key,
+            stripe_payment_method_types=config.stripe_payment_method_types,
+            stripe_currency=config.stripe_currency,
         )
     raise ValueError(
         f"Unknown PAYWALL mode {mode!r}; expected 'none', 'x402', or 'mpp'."

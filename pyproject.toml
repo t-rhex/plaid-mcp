@@ -52,7 +52,7 @@ cdp = [
 # pympp itself requires Python >= 3.11; operators on 3.10 can still use
 # the rest of plaid-mcp including the x402 gate.
 mpp = [
-    "pympp[tempo,server]>=0.6,<1; python_version >= '3.11'",
+    "pympp[tempo,server,stripe]>=0.6,<1; python_version >= '3.11'",
 ]
 
 [project.urls]

@@ -25,7 +25,7 @@ Everything runs locally. Access tokens stay in a chmod-600 SQLite file on your m
 - [Tool reference](#tool-reference)
 - [Example workflows](#example-workflows)
 - [How linking works under the hood](#how-linking-works-under-the-hood)
-- [Paid hosted mode (x402)](#paid-hosted-mode-x402)
+- [Paid hosted mode](#paid-hosted-mode)
 - [Deploying with Docker / Fly.io](#deploying-with-docker--flyio)
 - [Security notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
@@ -432,41 +432,91 @@ Per Plaid's docs, webhooks (`SESSION_FINISHED` event) are the *recommended* prod
 
 ---
 
-## Paid hosted mode (x402)
+## Paid hosted mode
 
-If you host `plaid-mcp serve` and want to let agents pay per tool call instead of giving them an API key, set the `PAYWALL=x402` env var. Every `tools/call` JSON-RPC request is then metered via Coinbase's [x402](https://x402.org/) protocol (HTTP 402 + USDC settlement on Base). Tool discovery (`tools/list`, `initialize`) stays free.
+`plaid-mcp` ships three payment rails; operators pick one via `PAYWALL=<rail>`. Tool discovery (`tools/list`, `initialize`) stays free across all of them — only `tools/call` is metered.
+
+### MPP (recommended) — Tempo stablecoin + Stripe cards
+
+The [Machine Payments Protocol](https://github.com/tempoxyz/pympp) via pympp. Use this if you want either:
+
+- **Pure crypto** — USDC on Tempo L2, no Stripe account required, wallet-to-wallet.
+- **Traditional cards** — any Stripe-supported method (requires a Stripe account).
+- **Both, advertised in the same 402** — clients pick based on what they have.
+
+```bash
+uv sync --extra mpp
+# or: pip install 'plaid-mcp[mpp]'
+```
 
 ```ini
-# Opt-in. Default is PAYWALL=none (stdio + HTTP both run free).
+PAYWALL=mpp
+MPP_METHODS=tempo,stripe                 # tempo | stripe | tempo,stripe
+
+# Tempo rail (only needed when 'tempo' is in MPP_METHODS):
+MPP_DESTINATION_ADDRESS=0x...            # Your Tempo wallet that receives USDC
+MPP_NETWORK=tempo-testnet                # tempo-testnet | tempo-mainnet
+# MPP_ALLOW_MAINNET=1                    # required to accept real USDC on Tempo
+
+# Stripe rail (only needed when 'stripe' is in MPP_METHODS):
+STRIPE_SECRET_KEY=sk_live_...            # your Stripe API secret
+STRIPE_CURRENCY=usd
+# STRIPE_PAYMENT_METHOD_TYPES=card,apple_pay
+```
+
+**How the 402 works**: on an unpaid `tools/call`, the server returns `402 Payment Required` with one `WWW-Authenticate: Payment ...` header per configured method. A well-behaved MPP client picks the method it can satisfy (Tempo if it has a USDC wallet, Stripe if it has a card), signs a credential, and replays with `Authorization: Payment <credential>`. The server routes the incoming credential back to the matching rail based on the challenge method field. On success, a `Payment-Receipt` header carries the settlement receipt.
+
+### x402 (alternative) — Coinbase CDP or x402.org facilitator
+
+Trustless HTTP 402 on Base. Use this for agents speaking Coinbase Agentic Wallets, CDP Agent Kit, or Cloudflare Agents — those clients have mature [x402](https://x402.org/) support today. Base mainnet needs Coinbase CDP facilitator auth; Base Sepolia works against x402.org's hosted facilitator out of the box.
+
+```bash
+uv sync --extra cdp                      # only required for Base mainnet
+```
+
+```ini
 PAYWALL=x402
 X402_RECEIVING_ADDRESS=0x...             # Base address that receives USDC
-X402_NETWORK=base-sepolia                # testnet default; `base` = mainnet
-# X402_ALLOW_MAINNET=true                # required to actually open mainnet
+X402_NETWORK=base-sepolia                # base-sepolia (testnet) | base (mainnet)
+# X402_ALLOW_MAINNET=1                   # required to actually open mainnet
 # X402_FACILITATOR_URL=                  # optional (defaults to https://x402.org/facilitator)
 ```
 
-Default prices live in `src/plaid_mcp/payments/prices.py` (10¢ for most tools, 50¢ for `summarize_debt_tool`). Override per-tool by forking or by building your own `PriceTable` if you embed this as a library.
+### None (default)
 
-**Flow per call**: client hits the server with no payment → server returns `402 Payment Required` with signed `accepts` array → client signs an EIP-3009 `transferWithAuthorization` payload → client replays the call with `X-PAYMENT` header → server calls the facilitator to verify → server runs the tool → server calls the facilitator to settle on-chain → response includes `X-Payment-Response` header with the settlement tx hash.
+```ini
+PAYWALL=none
+```
+
+No paywall. Suitable for personal stdio use via Claude Desktop and for self-hosted HTTP deployments where you gate access with `MCP_AUTH_TOKEN` instead.
 
 ### Client-side support
 
-- **Claude Desktop / Claude Code / Cursor** — install Coinbase's [x402 MCP bridge](https://docs.cdp.coinbase.com/x402/mcp-server) alongside `plaid-mcp`. The bridge holds the Base wallet and does the signing; `plaid-mcp` stays crypto-naive.
-- **OpenAI Agents SDK / LangChain** — `pip install "x402[httpx]"`, wrap the tool's HTTP client with the x402 client middleware.
-- **CDP Agent Kit** — native x402 actions; nothing extra to install.
+- **MPP clients** — pympp ships with a Python client; Stripe-side, any SDK that can create a PaymentIntent with the challenge amount and return the confirmation token works.
+- **Claude Desktop / Claude Code / Cursor (x402)** — install Coinbase's [x402 MCP bridge](https://docs.cdp.coinbase.com/x402/mcp-server) alongside `plaid-mcp`. The bridge holds the Base wallet and does the signing; `plaid-mcp` stays crypto-naive.
+- **OpenAI Agents SDK / LangChain (x402)** — `pip install "x402[httpx]"`, wrap the tool's HTTP client with the x402 client middleware.
+- **CDP Agent Kit (x402)** — native x402 actions; nothing extra to install.
 - **ChatGPT Custom Connectors** — no wallet primitive today; use an API-key fallback if you need this audience (not implemented yet).
+
+### Default prices
+
+Default prices live in `src/plaid_mcp/payments/prices.py` (10¢ for most tools, 50¢ for `summarize_debt_tool`). Override per-tool by forking or by building your own `PriceTable` if you embed this as a library. The price table is shared across all rails — an MPP-tempo caller and an x402-Base caller pay the same cents for the same tool.
 
 ### Verified end-to-end
 
-Live Base Sepolia round-trip tests ship under the `x402_testnet` pytest marker. Set `X402_TESTNET_PRIVATE_KEY` to a funded Base Sepolia wallet and run:
+Live facilitator round-trips ship under pytest markers. Set the relevant private key env var and run:
 
 ```bash
+# x402 on Base Sepolia (needs ~cent of testnet USDC)
 X402_TESTNET_PRIVATE_KEY=0x...                                     \
 X402_RECEIVING_ADDRESS=0x<your-wallet-or-throwaway>                \
   uv run pytest -v -m x402_testnet
+
+# MPP on Tempo testnet (xfail today; see test docstring)
+MPP_TESTNET_PRIVATE_KEY=0x... uv run pytest -v -m mpp_testnet
 ```
 
-Get testnet USDC from [Circle's faucet](https://faucet.circle.com) (pick **Base Sepolia**).
+Get x402 testnet USDC from [Circle's faucet](https://faucet.circle.com) (pick **Base Sepolia**).
 
 ---
 
