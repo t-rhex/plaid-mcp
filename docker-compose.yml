@@ -4,7 +4,7 @@
 #
 #   cp .env.example .env  # fill in PLAID_CLIENT_ID, X402_RECEIVING_ADDRESS, etc.
 #   docker compose up --build
-#   curl -i http://localhost:8080/mcp/   # expect 402 when PAYWALL=x402
+#   curl -i http://localhost:8080/mcp/   # expect 401 without the bearer token (MCP_AUTH_TOKEN in .env), 402 with it when PAYWALL=x402
 
 services:
   plaid-mcp:
