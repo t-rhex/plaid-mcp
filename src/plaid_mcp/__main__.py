@@ -9,11 +9,13 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import sys
 import webbrowser
 
 import click
 
+from .auth import BearerAuth
 from .config import Config
 from .link import complete_link, create_hosted_link
 from .payments import build_gate
@@ -40,7 +42,7 @@ def main(ctx: click.Context) -> None:
 def serve(host: str, port: int, transport: str) -> None:
     """Run the MCP server over HTTP for remote clients (Claude web, ChatGPT).
 
-    When ``PAYWALL=x402`` is set, wraps the Starlette app with an x402
+    Requests must carry ``Authorization: Bearer $MCP_AUTH_TOKEN``. When ``PAYWALL=x402`` is set, wraps the Starlette app with an x402
     payment gate so every ``tools/call`` JSON-RPC request is metered.
     """
     import uvicorn
@@ -53,6 +55,17 @@ def serve(host: str, port: int, transport: str) -> None:
     # PAYWALL=none the gate is a pass-through so this has zero overhead.
     app = server.http_app(transport=transport)
     wrapped = gate.asgi_middleware(app)
+
+    # MCP_AUTH_TOKEN is required for HTTP mode (README). Outermost, so unauthenticated
+    # requests are rejected before the paywall or the MCP app see them.
+    if config.auth_token:
+        wrapped = BearerAuth(wrapped, config.auth_token)
+    elif host not in ("127.0.0.1", "localhost", "::1") and os.getenv("MCP_ALLOW_NO_AUTH") != "1":
+        raise click.UsageError(
+            f"Refusing to listen on {host} without MCP_AUTH_TOKEN: anyone who can reach the "
+            "port could read the linked accounts. Set MCP_AUTH_TOKEN, bind to 127.0.0.1, or "
+            "set MCP_ALLOW_NO_AUTH=1 if something else in front already authenticates."
+        )
 
     if gate.name != "noop":
         click.echo(f"plaid-mcp payment gate: {gate.name}")
